@@ -2590,6 +2590,7 @@ dependencies = [
  "craft-collab",
  "hex",
  "macula-rust",
+ "serde",
  "serde_json",
  "tokio",
 ]

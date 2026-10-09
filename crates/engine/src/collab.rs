@@ -121,10 +121,11 @@ impl Session {
     }
 
     /// The exact edit a local command is about to make, when it is known
-    /// (typing): paragraph, byte index, replaced length, text. `None` means
+    /// (typing): paragraph, byte index, replaced length, text, and the
+    /// formatting that text will get (so peers' runs match). `None` means
     /// the command goes as a replayable [`Command`](craft_collab::Kind::Command)
     /// instead.
-    pub(crate) fn collab_exact_plan(&self, id: &str, params: &Value) -> Option<(u64, u32, u32, String)> {
+    pub(crate) fn collab_exact_plan(&self, id: &str, params: &Value) -> Option<(u64, u32, u32, String, Option<Vec<u8>>)> {
         if id != "text.insert" {
             return None;
         }
@@ -140,13 +141,15 @@ impl Session {
         if pid == 0 {
             return None;
         }
-        Some((pid, a.off as u32, (b.off - a.off) as u32, text.to_string()))
+        let props = serde_json::to_vec(&self.typing_props()).ok();
+        Some((pid, a.off as u32, (b.off - a.off) as u32, text.to_string(), props))
     }
 
     /// Applies a captured exact edit to the CRDT and shares it, healing any
     /// difference between the CRDT and the document (autocorrect and the
-    /// like) in the same step.
-    pub(crate) fn collab_apply_exact(&mut self, pid: u64, index: u32, remove: u32, insert: String) {
+    /// like) in the same step. `props` is the formatting the inserted text
+    /// got, carried to the peers.
+    pub(crate) fn collab_apply_exact(&mut self, pid: u64, index: u32, remove: u32, insert: String, props: Option<Vec<u8>>) {
         let para = pid.to_string();
         let Some(doc_text) = self.doc.paragraph_by_pid(pid).and_then(|(s, p)| self.doc.para(s, &p).map(|p| p.text.clone())) else {
             return;
@@ -154,15 +157,15 @@ impl Session {
         let mut updates = Vec::new();
         if let Some(c) = self.collab.as_mut() {
             if let Some(u) = c.texts.local_edit_exact(&para, index, remove, &insert) {
-                updates.push(u);
+                updates.push((u, props.clone()));
             }
             if let Some(u) = c.texts.sync(&para, &doc_text) {
-                updates.push(u);
+                updates.push((u, None));
             }
         }
-        for update in updates {
+        for (update, props) in updates {
             if let Some(c) = self.collab.as_mut() {
-                c.send(craft_collab::Kind::TextEdit { para: para.clone(), update });
+                c.send(craft_collab::Kind::TextEdit { para: para.clone(), update, props });
             }
         }
     }
@@ -230,7 +233,7 @@ impl Session {
 
     fn collab_receive(&mut self, msg: craft_collab::Message) {
         match msg.kind {
-            craft_collab::Kind::TextEdit { para, update } => {
+            craft_collab::Kind::TextEdit { para, update, props } => {
                 self.collab_record_latency(&msg.author, msg.sent_at_ms);
                 let merged = match self.collab.as_mut() {
                     Some(c) => c.texts.apply_update(&para, &update),
@@ -238,18 +241,26 @@ impl Session {
                 };
                 let Ok(merged) = merged else { return };
                 let Ok(pid) = para.parse::<u64>() else { return };
-                if self.doc.set_paragraph_text_by_pid(pid, &merged) {
+                let carried: Option<wordcraft_doc::CharProps> = props.as_deref().and_then(|b| serde_json::from_slice(b).ok());
+                if self.doc.apply_paragraph_text(pid, &merged, carried.as_ref()) {
                     self.touch();
                     self.clamp_selection();
                 }
             }
             craft_collab::Kind::Command { id, params, anchor } => {
                 self.collab_record_latency(&msg.author, msg.sent_at_ms);
+                // Replay under the command's own selection, but leave the
+                // local author's caret exactly as it was: the replay must
+                // not turn the next local typing into a replacement.
+                let previous = self.sel.clone();
                 if let Some(sel) = anchor.as_deref().and_then(|s| selection_from(&self.doc, s)) {
                     self.sel = sel;
                 }
                 let parsed: Value = serde_json::from_slice(&params).unwrap_or(Value::Null);
-                if let Err(e) = self.run_with_origin(&id, &parsed, craft_collab::Origin::Remote { author: msg.author.clone() }) {
+                let result = self.run_with_origin(&id, &parsed, craft_collab::Origin::Remote { author: msg.author.clone() });
+                self.sel = previous;
+                self.clamp_selection();
+                if let Err(e) = result {
                     if let Some(c) = self.collab.as_mut() {
                         c.remote_errors += 1;
                     }
@@ -264,17 +275,20 @@ impl Session {
             }
             craft_collab::Kind::SnapshotRequest {} => {
                 let data = craft_collab::DocAdapter::snapshot(self);
+                let crdt = self.collab.as_ref().map(|c| c.texts.full_update()).unwrap_or_default();
                 if let Some(c) = self.collab.as_mut() {
-                    c.send(craft_collab::Kind::Snapshot { data });
+                    c.send(craft_collab::Kind::Snapshot { data, crdt });
                 }
             }
-            craft_collab::Kind::Snapshot { data } => {
+            craft_collab::Kind::Snapshot { data, crdt } => {
                 let joining = matches!(&self.collab, Some(c) if c.awaiting_snapshot);
-                if joining
-                    && craft_collab::DocAdapter::load_snapshot(self, &data).is_ok()
-                    && let Some(c) = self.collab.as_mut()
-                {
-                    c.awaiting_snapshot = false;
+                if joining && craft_collab::DocAdapter::load_snapshot(self, &data).is_ok() {
+                    // Seed the CRDT too, or post-join merges would not align
+                    // with the peers' item history.
+                    if let Some(c) = self.collab.as_mut() {
+                        let _ = c.texts.apply_doc_update(&crdt);
+                        c.awaiting_snapshot = false;
+                    }
                 }
             }
         }
@@ -368,7 +382,7 @@ impl Session {
         };
         let Some((para, update, merged)) = undone else { return false };
         if let Some(c) = self.collab.as_mut() {
-            c.send(craft_collab::Kind::TextEdit { para: para.clone(), update });
+            c.send(craft_collab::Kind::TextEdit { para: para.clone(), update, props: None });
         }
         if let Ok(pid) = para.parse::<u64>()
             && self.doc.set_paragraph_text_by_pid(pid, &merged)
@@ -576,6 +590,109 @@ mod tests {
         assert_eq!(bold(&a, 6), Some(true), "A replayed the bold");
         assert_eq!(bold(&a, 0), None, "the text before it is untouched");
         assert_eq!(bold(&a, 10), Some(true), "the whole word is bold");
+    }
+
+    fn runs_of(s: &Session) -> Vec<(usize, usize, wordcraft_doc::CharProps)> {
+        let Some(p) = s.doc.para(StoryRef::Body, &wordcraft_doc::Path::top(0)) else { return Vec::new() };
+        let mut out = Vec::new();
+        let mut start = 0;
+        for r in &p.runs {
+            out.push((start, start + r.len, r.props.clone()));
+            start += r.len;
+        }
+        out
+    }
+
+    #[test]
+    fn style_predating_a_remote_text_update_survives() {
+        let (ta, tb) = MemoryTransport::pair("aaaaaaaa", "bbbbbbbb");
+        let mut a = session();
+        let mut b = session();
+        a.collab_attach("demo", "Alice", Box::new(ta));
+        b.collab_join("demo", "Bob", Box::new(tb));
+        b.collab_tick();
+        a.collab_tick();
+        b.collab_tick();
+
+        a.run("text.insert", &json!({"text": "Hello world. "})).expect("A types");
+        b.collab_tick();
+        // B bolds "world"; A replays it.
+        b.run("select.text", &json!({"text": "world"})).expect("B selects");
+        b.run("format.bold", &json!({})).expect("B bolds");
+        a.collab_tick();
+        assert_eq!(runs_of(&a), runs_of(&b), "the bold replicated");
+
+        // A types after the bold: B's bold must survive the text update.
+        a.run("text.insert", &json!({"text": "more "})).expect("A types again");
+        b.collab_tick();
+        assert_eq!(a.doc.plain_text(StoryRef::Body), b.doc.plain_text(StoryRef::Body));
+        assert_eq!(runs_of(&a), runs_of(&b), "style predating the text update survived on B");
+    }
+
+    #[test]
+    fn replaying_a_remote_command_keeps_the_local_caret() {
+        let (ta, tb) = MemoryTransport::pair("aaaaaaaa", "bbbbbbbb");
+        let mut a = session();
+        let mut b = session();
+        a.collab_attach("demo", "Alice", Box::new(ta));
+        b.collab_join("demo", "Bob", Box::new(tb));
+        b.collab_tick();
+        a.collab_tick();
+        b.collab_tick();
+
+        a.run("text.insert", &json!({"text": "Hello world"})).expect("A types");
+        b.collab_tick();
+        let before = a.sel.clone();
+
+        // B bolds "Hello"; A replays it, but must not keep B's selection.
+        b.run("select.text", &json!({"text": "Hello"})).expect("B selects");
+        b.run("format.bold", &json!({})).expect("B bolds");
+        a.collab_tick();
+        assert_eq!(a.sel, before, "A's own caret was restored after the replay");
+
+        // A's next typing goes at its caret, not over the remote selection.
+        a.run("text.insert", &json!({"text": "X"})).expect("A types");
+        assert_eq!(a.doc.plain_text(StoryRef::Body), "Hello worldX", "typed at the caret");
+    }
+
+    #[test]
+    fn a_restarted_joiner_catches_up_and_keeps_merging() {
+        // All three share one bus, as they do on one mesh topic; Carol's
+        // session is fresh (a restarted process) and joins existing content.
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb", "cccccccc"]);
+        let (ta, tb, tc) = (bus.remove(0), bus.remove(0), bus.remove(0));
+        let mut a = session();
+        let mut b = session();
+        let mut c = session();
+        a.collab_attach("demo", "Alice", Box::new(ta));
+        b.collab_join("demo", "Bob", Box::new(tb));
+        b.collab_tick();
+        a.collab_tick();
+        b.collab_tick();
+
+        a.run("text.insert", &json!({"text": "Hello "})).expect("A types");
+        b.collab_tick();
+        a.run("text.insert", &json!({"text": "world. "})).expect("A types again");
+        b.collab_tick();
+        assert_eq!(a.doc.plain_text(StoryRef::Body), "Hello world. ");
+
+        // Carol restarts and joins the existing document.
+        c.collab_join("demo", "Carol", Box::new(tc));
+        c.collab_tick();
+        a.collab_tick();
+        b.collab_tick();
+        c.collab_tick();
+        assert_eq!(c.doc.plain_text(StoryRef::Body), "Hello world. ", "Carol caught up");
+
+        // Both directions keep merging after the join.
+        c.run("text.insert", &json!({"text": "C! "})).expect("C types");
+        a.collab_tick();
+        assert_eq!(a.doc.plain_text(StoryRef::Body), c.doc.plain_text(StoryRef::Body), "C's typing reached A");
+        a.run("text.insert", &json!({"text": "A2 "})).expect("A types");
+        c.collab_tick();
+        assert_eq!(a.doc.plain_text(StoryRef::Body), c.doc.plain_text(StoryRef::Body), "A's typing reached C");
+        b.collab_tick();
+        assert_eq!(b.doc.plain_text(StoryRef::Body), a.doc.plain_text(StoryRef::Body), "B converges too");
     }
 
     #[test]

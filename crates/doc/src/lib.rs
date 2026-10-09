@@ -732,20 +732,75 @@ impl Document {
     }
 
     /// Replaces the text of the paragraph with stable id `pid` with the
-    /// merged CRDT text, rebuilding its runs as one (keeping the last run's
-    /// formatting). Whether the paragraph was found.
-    pub fn set_paragraph_text_by_pid(&mut self, pid: u64, text: &str) -> bool {
+    /// merged CRDT text, splicing the paragraph's runs so formatting
+    /// outside the changed span survives. When `inserted_props` is given
+    /// (a peer's typing), the inserted span gets those props; otherwise it
+    /// inherits what typing at the splice point would. Whether the
+    /// paragraph was found.
+    pub fn apply_paragraph_text(&mut self, pid: u64, text: &str, inserted_props: Option<&CharProps>) -> bool {
         let Some((story, path)) = self.paragraph_by_pid(pid) else {
             return false;
         };
         let Ok(p) = self.para_mut(story, &path) else {
             return false;
         };
-        let props = p.runs.last().map(|r| r.props.clone()).unwrap_or_else(|| p.mark.clone());
+        let (pre, removed, inserted) = splice(&p.text, text);
+        if removed == 0 && inserted == 0 {
+            return true;
+        }
+        let ins_props = inserted_props.cloned().unwrap_or_else(|| p.props_at(pre).clone());
+        // Runs before, across and after the changed span; the overlapping
+        // run keeps its head and tail, so its formatting stays around the
+        // change.
+        let mut before: Vec<Run> = Vec::new();
+        let mut after: Vec<Run> = Vec::new();
+        let mut start = 0usize;
+        for r in &p.runs {
+            let end = start + r.len;
+            if end <= pre {
+                before.push(r.clone());
+            } else if start >= pre + removed {
+                after.push(r.clone());
+            } else {
+                if start < pre {
+                    before.push(Run { len: pre - start, props: r.props.clone() });
+                }
+                let tail = (pre + removed).max(start);
+                if end > tail {
+                    after.push(Run { len: end - tail, props: r.props.clone() });
+                }
+            }
+            start = end;
+        }
+        let mut runs = before;
+        if inserted > 0 {
+            runs.push(Run { len: inserted, props: ins_props });
+        }
+        runs.extend(after);
+        let mut merged: Vec<Run> = Vec::new();
+        for r in runs {
+            if r.len == 0 {
+                continue;
+            }
+            if let Some(last) = merged.last_mut()
+                && last.props == r.props
+            {
+                last.len += r.len;
+            } else {
+                merged.push(r);
+            }
+        }
         p.text = text.to_string();
-        p.runs = if text.is_empty() { Vec::new() } else { vec![Run { len: text.len(), props }] };
+        p.runs = merged;
         p.touch();
         true
+    }
+
+    /// Replaces the text of the paragraph with stable id `pid` with the
+    /// merged CRDT text, keeping the formatting around the change (the
+    /// inserted span inherits what typing at the splice point would).
+    pub fn set_paragraph_text_by_pid(&mut self, pid: u64, text: &str) -> bool {
+        self.apply_paragraph_text(pid, text, None)
     }
 
     pub fn story(&self, s: StoryRef) -> Option<&Blocks> {
@@ -1336,6 +1391,27 @@ impl PermRange {
 /// Words in `s` (tokens separated by whitespace that contain at least one alphanumeric char).
 pub fn count_words(s: &str) -> usize {
     s.split(|c: char| c.is_whitespace() || c == para::OBJ).filter(|w| w.chars().any(char::is_alphanumeric)).count()
+}
+
+/// The single contiguous change from `old` to `new`: (start, removed bytes,
+/// inserted bytes), at char boundaries.
+fn splice(old: &str, new: &str) -> (usize, usize, usize) {
+    let max = old.len().min(new.len());
+    let mut pre = 0;
+    while pre < max && old.as_bytes()[pre] == new.as_bytes()[pre] {
+        pre += 1;
+    }
+    while pre > 0 && !(old.is_char_boundary(pre) && new.is_char_boundary(pre)) {
+        pre -= 1;
+    }
+    let mut suf = 0;
+    while suf < max - pre && old.as_bytes()[old.len() - 1 - suf] == new.as_bytes()[new.len() - 1 - suf] {
+        suf += 1;
+    }
+    while suf > 0 && !(old.is_char_boundary(old.len() - suf) && new.is_char_boundary(new.len() - suf)) {
+        suf -= 1;
+    }
+    (pre, old.len() - suf - pre, new.len() - suf - pre)
 }
 
 fn walk(bl: &Blocks, prefix: &mut Vec<u32>, out: &mut Vec<Path>, depth: usize) {

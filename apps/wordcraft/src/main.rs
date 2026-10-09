@@ -208,6 +208,9 @@ fn services(file_dialog: file_dialogs::Hook, ctx: &egui::Context) -> Services {
         clipboard_html: Some(Box::new(clipboard::html)),
         clipboard_rtf: Some(Box::new(clipboard::rtf)),
         clipboard_formats: Some(Box::new(clipboard::formats)),
+        join_invite: Some(Box::new(|session: &mut wordcraft_engine::Session, invite: &str, name: &str| {
+            collab_setup::join_from_invite(session, invite, name)
+        })),
         ..Default::default()
     }
 }

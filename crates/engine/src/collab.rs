@@ -64,6 +64,9 @@ pub struct CollabRuntime {
     pending: std::collections::BTreeMap<String, (String, u64, craft_collab::Role)>,
     /// Whether the host admits a valid token without asking.
     auto_approve: bool,
+    /// The mesh coordinates this host shares in: (realm, realm key, seed,
+    /// signing profile). Opaque here; the invite carries them for a joiner.
+    share: Option<(String, String, String, String)>,
 }
 
 impl CollabRuntime {
@@ -95,6 +98,7 @@ impl CollabRuntime {
             last_grant_ms: 0,
             pending: std::collections::BTreeMap::new(),
             auto_approve: false,
+            share: None,
         }
     }
 
@@ -194,6 +198,42 @@ impl Session {
         }
     }
 
+    /// Remembers the mesh coordinates this host shares in, so the UI can
+    /// mint an invite with one call.
+    pub fn collab_set_share_context(&mut self, realm: &str, realm_key: &str, seed: &str, profile: &str) {
+        if let Some(c) = self.collab.as_mut() {
+            c.share = Some((realm.to_string(), realm_key.to_string(), seed.to_string(), profile.to_string()));
+        }
+    }
+
+    /// The holders of this document (the UI's People list), sorted.
+    pub fn collab_holders(&self) -> Vec<String> {
+        self.collab
+            .as_ref()
+            .and_then(|c| c.access.as_ref())
+            .map(|a| a.holder_ids())
+            .unwrap_or_default()
+    }
+
+    /// Whether this session can mint invites (it is the host and knows its
+    /// mesh coordinates).
+    pub fn collab_can_invite(&self) -> bool {
+        self.collab.as_ref().is_some_and(|c| c.issuer.is_some() && c.share.is_some())
+    }
+
+    /// Mints an invite from the remembered share context (the UI's Copy
+    /// invite): `role` and `ttl_ms` as in `collab_mint_invite`.
+    pub fn collab_invite_from_context(&mut self, role: craft_collab::Role, ttl_ms: u64) -> Result<String, String> {
+        let (realm, realm_key, seed, profile) = {
+            let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
+            let Some((realm, realm_key, seed, profile)) = c.share.as_ref() else {
+                return Err("this session does not know its mesh coordinates".into());
+            };
+            (realm.clone(), realm_key.clone(), seed.clone(), profile.clone())
+        };
+        self.collab_mint_invite(&realm, &realm_key, &seed, &profile, role, ttl_ms)
+    }
+
     /// Joins `doc` through an invite: presents its open token until the host
     /// grants this node, then asks for the snapshot.
     pub fn collab_join_via_invite(
@@ -252,12 +292,15 @@ impl Session {
         Ok(())
     }
 
-    /// Mints this host's invite for the document: `realm` and `seed` are the
-    /// mesh coordinates to share, verbatim. Returns the copyable line.
+    /// Mints this host's invite for the document: `realm`, `realm_key` and
+    /// `seed` are the mesh coordinates to share, verbatim. Returns the
+    /// copyable line.
     pub fn collab_mint_invite(
         &mut self,
         realm: &str,
+        realm_key: &str,
         seed: &str,
+        profile: &str,
         role: craft_collab::Role,
         ttl_ms: u64,
     ) -> Result<String, String> {
@@ -275,6 +318,8 @@ impl Session {
             host_key: hex_bytes(&host_key),
             host_name,
             realm: realm.to_string(),
+            realm_key: realm_key.to_string(),
+            profile: profile.to_string(),
             seed: seed.to_string(),
             issued_ms: now,
             expires_ms: now.saturating_add(ttl_ms),

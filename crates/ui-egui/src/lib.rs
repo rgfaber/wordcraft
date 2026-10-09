@@ -73,6 +73,7 @@ pub mod table_resize;
 pub mod table_ruler;
 pub mod theme;
 pub mod widgets;
+pub mod share;
 pub mod window_geometry;
 pub mod wordart_menus;
 pub mod zotero;
@@ -143,6 +144,9 @@ pub struct Services {
     /// `xdg-mime`. `None` (web, macOS) hides the button; macOS shows how to do it in Finder
     /// instead. An error means nothing changed.
     pub make_default_app: Option<Box<dyn Fn() -> Result<DefaultApp, String>>>,
+    /// Join through an invite line (app-injected: the app owns the mesh
+    /// adapter). `(session, invite line, display name)`.
+    pub join_invite: Option<Box<dyn Fn(&mut Session, &str, &str) -> Result<(), String>>>,
 }
 
 /// What [`Services::make_default_app`] did.
@@ -349,6 +353,7 @@ pub struct WordApp {
     pub colors: Option<colors::ColorsDialog>,
     /// The Restrict Editing pane (#412).
     pub restrict: dialogs_review::RestrictPane,
+    pub share: share::ShareState,
     pub status_msg: Option<(String, f64)>,
     pub previews: previews::Previews,
     /// Media key of the picture a pending Change Picture replaces (#147).
@@ -465,6 +470,7 @@ impl WordApp {
             dialog: None,
             colors: None,
             restrict: Default::default(),
+            share: share::ShareState::default(),
             status_msg: None,
             previews: previews::Previews::default(),
             integrated_titlebar: false,
@@ -1070,6 +1076,9 @@ impl WordApp {
                 };
                 return Some(self.answer_save_changes(choice));
             }
+            "ui.share" => {
+                self.share.open = p.get("value").and_then(Value::as_bool).unwrap_or(!self.share.open);
+                json!({"share": self.share.open, "active": self.session.collab_active()})
             "ui.openFileDialog" => {
                 self.open_dialog();
                 json!({})
@@ -1539,6 +1548,7 @@ impl WordApp {
         zotero::show_alert(self, &ctx);
         read_aloud::show(self, &ctx);
         crate::keytips::show(self, &ctx, ui);
+        share::show(self, &ctx);
         keys::global_shortcuts(self, &ctx);
         if let Some(url) = self.canvas.open_url.take() {
             ctx.open_url(egui::OpenUrl::new_tab(url));

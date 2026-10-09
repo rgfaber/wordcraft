@@ -803,6 +803,51 @@ impl Document {
         self.apply_paragraph_text(pid, text, None)
     }
 
+    /// Makes the paragraph's bold match the given byte-range spans, keeping
+    /// every other character property, and merges adjacent equal runs (one
+    /// canonical derivation for every replica). Whether the paragraph was
+    /// found.
+    pub fn set_paragraph_bold_by_pid(&mut self, pid: u64, spans: &[(u32, u32)]) -> bool {
+        let Some((story, path)) = self.paragraph_by_pid(pid) else {
+            return false;
+        };
+        let Ok(p) = self.para_mut(story, &path) else {
+            return false;
+        };
+        let len = p.text.len();
+        let mut bounds: Vec<usize> = vec![0, len];
+        let mut start = 0usize;
+        for r in &p.runs {
+            start += r.len;
+            bounds.push(start);
+        }
+        for (s, e) in spans {
+            bounds.push((*s as usize).min(len));
+            bounds.push((*e as usize).min(len));
+        }
+        bounds.sort_unstable();
+        bounds.dedup();
+        let mut out: Vec<Run> = Vec::new();
+        for w in bounds.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if a >= b {
+                continue;
+            }
+            let mut props = p.props_of_char(a).clone();
+            let bold = spans.iter().any(|(s, e)| a >= *s as usize && a < *e as usize);
+            props.bold = if bold { Some(true) } else { None };
+            if let Some(last) = out.last_mut()
+                && last.props == props
+            {
+                last.len += b - a;
+            } else {
+                out.push(Run { len: b - a, props });
+            }
+        }
+        p.runs = out;
+        true
+    }
+
     pub fn story(&self, s: StoryRef) -> Option<&Blocks> {
         match s {
             StoryRef::Body => Some(&self.body),

@@ -108,6 +108,8 @@ pub fn join_from_invite(session: &mut Session, invite_line: &str, name: &str) ->
 
 fn join_line(session: &mut Session, identity: &Identity, name: &str, line: &str) -> Result<(), String> {
     let invite = craft_collab::Invite::decode(line.trim())?;
+    // The joiner verifies who invited it before connecting anywhere.
+    macula_craft_collab::verify_invite(&invite)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

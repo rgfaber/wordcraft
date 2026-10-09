@@ -1,20 +1,24 @@
 //! The collaboration glue: craft-collab's shared mechanism attached to a session.
 //!
-//! Wordcraft's adoption of the seam. Local commands are captured after they
-//! apply as paragraph text updates (stable paragraph ids); peer updates are
-//! applied through the same document model but outside the local undo
-//! history; undo reverts only this author's own edits, as an inverse CRDT
-//! edit, and shares that with the peers. The remote-command path
-//! ([`run_with_origin`](crate::Session::run_with_origin)) exists for
-//! mechanism adoption; the spike carries text and cursors only.
+//! Wordcraft's adoption of the seam. Local typing is captured as an exact
+//! paragraph text update (stable pid, caret, text); every other mutating
+//! command is captured as a [`Command`](craft_collab::Kind::Command) op with
+//! the selection it ran under, which the peers replay through the same
+//! registry with [`Origin::Remote`](craft_collab::Origin). Peer messages are
+//! applied in per-author sequence (text updates are order-insensitive; a
+//! command is not), outside the local undo history; undo reverts only this
+//! author's own edits. Received edits also carry a latency sample.
+
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use wordcraft_doc::{Document, Pos, StoryRef};
+use wordcraft_doc::{Document, Pos};
 
 use crate::{CmdError, Session};
 
-/// Everything a shared session needs: the peers' transport, the text CRDT
-/// and the presence table.
+/// Everything a shared session needs: the peers' transport, the text CRDT,
+/// the ordering buffer, the presence table and the latency samples.
 pub struct CollabRuntime {
     doc: String,
     name: String,
@@ -22,6 +26,11 @@ pub struct CollabRuntime {
     transport: Box<dyn craft_collab::Transport>,
     texts: craft_collab::TextMerge,
     presence: craft_collab::Presence,
+    order: craft_collab::OrderBuffer,
+    /// Received-edit latency per author, milliseconds.
+    latency: HashMap<String, Vec<u64>>,
+    /// Remote commands that failed to apply (a divergence signal).
+    remote_errors: u64,
     seq: u64,
     last_cursor: Option<String>,
     /// This session asked for the document snapshot and is waiting for it.
@@ -40,6 +49,9 @@ impl CollabRuntime {
             transport,
             texts,
             presence: craft_collab::Presence::default(),
+            order: craft_collab::OrderBuffer::default(),
+            latency: HashMap::new(),
+            remote_errors: 0,
             seq: 0,
             last_cursor: None,
             awaiting_snapshot: false,
@@ -47,18 +59,37 @@ impl CollabRuntime {
         }
     }
 
-    /// The messages for this document from other authors.
+    /// The messages for this document from other authors, in per-author
+    /// sequence.
     fn poll(&mut self) -> Vec<craft_collab::Message> {
         let doc = self.doc.clone();
         let author = self.author.clone();
-        self.transport.poll().into_iter().filter(|m| m.doc == doc && m.author != author).collect()
+        let mut out = Vec::new();
+        for msg in self.transport.poll() {
+            if msg.doc == doc && msg.author != author {
+                out.extend(self.order.push(msg));
+            }
+        }
+        out
     }
 
     /// Queues a message for the peers.
     fn send(&mut self, kind: craft_collab::Kind) {
         self.seq += 1;
-        let msg = craft_collab::Message { doc: self.doc.clone(), author: self.author.clone(), seq: self.seq, kind };
+        let msg = craft_collab::Message { doc: self.doc.clone(), author: self.author.clone(), seq: self.seq, sent_at_ms: now_ms(), kind };
         let _ = self.transport.send(msg);
+    }
+}
+
+/// Milliseconds since the epoch (0 where there is no clock).
+pub(crate) fn now_ms() -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        0
     }
 }
 
@@ -89,29 +120,10 @@ impl Session {
         self.collab.is_some()
     }
 
-    /// Every paragraph's text by stable id: the pre-command image.
-    pub(crate) fn collab_text_map(&self) -> Vec<(u64, String)> {
-        let mut out = Vec::new();
-        let story = |s: StoryRef, doc: &Document, out: &mut Vec<(u64, String)>| {
-            for path in doc.para_paths(s) {
-                if let Some(p) = doc.para(s, &path)
-                    && p.pid != 0
-                {
-                    out.push((p.pid, p.text.clone()));
-                }
-            }
-        };
-        story(StoryRef::Body, &self.doc, &mut out);
-        let parts: Vec<u32> = self.doc.parts.keys().copied().collect();
-        for id in parts {
-            story(StoryRef::Part(id), &self.doc, &mut out);
-        }
-        out
-    }
-
     /// The exact edit a local command is about to make, when it is known
-    /// (typing): paragraph, byte index, replaced length, text. `None` falls
-    /// back to the text-diff capture.
+    /// (typing): paragraph, byte index, replaced length, text. `None` means
+    /// the command goes as a replayable [`Command`](craft_collab::Kind::Command)
+    /// instead.
     pub(crate) fn collab_exact_plan(&self, id: &str, params: &Value) -> Option<(u64, u32, u32, String)> {
         if id != "text.insert" {
             return None;
@@ -155,27 +167,44 @@ impl Session {
         }
     }
 
-    /// Turns a successful local command's paragraph text changes into CRDT
-    /// updates and queues them for the peers.
-    pub(crate) fn collab_after(&mut self, before: &[(u64, String)]) {
-        let after = self.collab_text_map();
-        let mut updates = Vec::new();
-        for (pid, text) in &after {
-            let old = before.iter().find(|(p, _)| p == pid).map(|(_, t)| t.as_str()).unwrap_or("");
-            if old == text {
-                continue;
-            }
-            if let Some(c) = self.collab.as_mut()
-                && let Some(update) = c.texts.local_edit(&pid.to_string(), old, text)
-            {
-                updates.push((pid.to_string(), update));
-            }
+    /// The command to replay on the peers for a local mutating command the
+    /// exact path did not take: its id, its params as JSON, and the
+    /// selection it runs under (both ends as pid + offset), so a
+    /// position-carrying command (a style change) is applied as it was
+    /// issued. `None` for commands that must not be shared (undo/redo, the
+    /// spiked collab/debug/UI commands).
+    pub(crate) fn collab_command_plan(&self, id: &str, params: &Value) -> Option<(String, Vec<u8>, Option<String>)> {
+        if matches!(id, "edit.undo" | "edit.redo" | "edit.repeat" | "text.insert") {
+            return None;
         }
-        for (para, update) in updates {
-            if let Some(c) = self.collab.as_mut() {
-                c.send(craft_collab::Kind::TextEdit { para, update });
-            }
+        if id.starts_with("collab.")
+            || id.starts_with("caret.")
+            || id.starts_with("select.")
+            || id.starts_with("view.")
+            || id.starts_with("ui.")
+            || id.starts_with("file.")
+            || id.starts_with("tools.")
+        {
+            return None;
         }
+        let bytes = serde_json::to_vec(params).ok()?;
+        Some((id.to_string(), bytes, self.selection_json()))
+    }
+
+    /// Queues a captured command for the peers.
+    pub(crate) fn collab_send_command(&mut self, id: String, params: Vec<u8>, anchor: Option<String>) {
+        if let Some(c) = self.collab.as_mut() {
+            c.send(craft_collab::Kind::Command { id, params, anchor });
+        }
+    }
+
+    /// The selection as the app encodes it: both ends as pid + offset.
+    fn selection_json(&self) -> Option<String> {
+        let encode = |p: &Pos| -> Option<Value> {
+            let para = self.doc.para_at(p)?;
+            (para.pid != 0).then(|| json!({"pid": para.pid, "off": p.off.min(para.len())}))
+        };
+        Some(json!({"anchor": encode(&self.sel.anchor)?, "focus": encode(&self.sel.focus)?}).to_string())
     }
 
     /// Applies what the peers sent and shares this author's cursor. The app
@@ -202,6 +231,7 @@ impl Session {
     fn collab_receive(&mut self, msg: craft_collab::Message) {
         match msg.kind {
             craft_collab::Kind::TextEdit { para, update } => {
+                self.collab_record_latency(&msg.author, msg.sent_at_ms);
                 let merged = match self.collab.as_mut() {
                     Some(c) => c.texts.apply_update(&para, &update),
                     None => return,
@@ -211,6 +241,19 @@ impl Session {
                 if self.doc.set_paragraph_text_by_pid(pid, &merged) {
                     self.touch();
                     self.clamp_selection();
+                }
+            }
+            craft_collab::Kind::Command { id, params, anchor } => {
+                self.collab_record_latency(&msg.author, msg.sent_at_ms);
+                if let Some(sel) = anchor.as_deref().and_then(|s| selection_from(&self.doc, s)) {
+                    self.sel = sel;
+                }
+                let parsed: Value = serde_json::from_slice(&params).unwrap_or(Value::Null);
+                if let Err(e) = self.run_with_origin(&id, &parsed, craft_collab::Origin::Remote { author: msg.author.clone() }) {
+                    if let Some(c) = self.collab.as_mut() {
+                        c.remote_errors += 1;
+                    }
+                    self.status = format!("remote {id}: {e}");
                 }
             }
             craft_collab::Kind::CursorMoved { position, name } => {
@@ -235,6 +278,63 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// Records one received-edit latency sample (skipped when the sender had
+    /// no clock).
+    fn collab_record_latency(&mut self, author: &str, sent_at_ms: u64) {
+        if sent_at_ms == 0 {
+            return;
+        }
+        let now = now_ms();
+        if let Some(c) = self.collab.as_mut() {
+            c.latency.entry(author.to_string()).or_default().push(now.saturating_sub(sent_at_ms));
+        }
+    }
+
+    /// The collaboration status for agents: peers, join state, per-pair
+    /// latency (p50/p95) and the count of remote commands that failed to
+    /// apply (a divergence signal).
+    pub fn collab_stats(&self) -> Value {
+        let Some(c) = self.collab.as_ref() else {
+            return json!({"active": false});
+        };
+        let peers: Vec<Value> = c
+            .presence
+            .peers()
+            .map(|p| {
+                json!({
+                    "name": p.name,
+                    "author": short(&p.author),
+                    "hasCursor": p.position.is_some(),
+                })
+            })
+            .collect();
+        let mut latency: Vec<Value> = c
+            .latency
+            .iter()
+            .map(|(author, samples)| {
+                let mut v = samples.clone();
+                v.sort_unstable();
+                json!({
+                    "author": short(author),
+                    "n": v.len(),
+                    "p50Ms": percentile(&v, 50),
+                    "p95Ms": percentile(&v, 95),
+                })
+            })
+            .collect();
+        latency.sort_by(|a, b| a["author"].as_str().cmp(&b["author"].as_str()));
+        json!({
+            "active": true,
+            "doc": c.doc,
+            "author": short(&c.author),
+            "joined": !c.awaiting_snapshot,
+            "seq": c.seq,
+            "peers": peers,
+            "latency": latency,
+            "remoteErrors": c.remote_errors,
+        })
     }
 
     /// Shares this author's cursor when it moved since the last share.
@@ -299,6 +399,35 @@ fn cursor_pos(doc: &Document, encoded: &str) -> Option<Pos> {
     Some(Pos { story, path, off: off.min(len) })
 }
 
+/// Decodes an app selection (`{"anchor": {"pid", "off"}, "focus": {...}}`)
+/// into a session selection.
+fn selection_from(doc: &Document, encoded: &str) -> Option<crate::Selection> {
+    let v: Value = serde_json::from_str(encoded).ok()?;
+    let end = |which: &str| -> Option<Pos> {
+        let e = v.get(which)?;
+        let pid = e.get("pid")?.as_u64()?;
+        let off = e.get("off").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let (story, path) = doc.paragraph_by_pid(pid)?;
+        let len = doc.para(story, &path).map(|p| p.len()).unwrap_or(0);
+        Some(Pos { story, path, off: off.min(len) })
+    };
+    Some(crate::Selection { anchor: end("anchor")?, focus: end("focus")? })
+}
+
+/// The first eight hex characters of an author id, for reports.
+pub(crate) fn short(author: &str) -> String {
+    author.chars().take(8).collect()
+}
+
+/// The p-th percentile of a sorted, non-empty sample list (nearest rank).
+fn percentile(sorted: &[u64], p: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let idx = ((sorted.len() - 1) * p) / 100;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
 impl craft_collab::DocAdapter for Session {
     fn snapshot(&self) -> Vec<u8> {
         serde_json::to_vec(&self.doc).unwrap_or_default()
@@ -335,6 +464,7 @@ impl craft_collab::CollabHost for Session {
 mod tests {
     use super::*;
     use craft_collab::MemoryTransport;
+    use wordcraft_doc::StoryRef;
 
     fn session() -> Session {
         Session::new(Document::from_text(""))
@@ -419,6 +549,33 @@ mod tests {
         a.collab_tick();
         assert_eq!(b.doc.plain_text(StoryRef::Body), "Hi from Bob. ", "only B's text went");
         assert_eq!(a.doc.plain_text(StoryRef::Body), "Hi from Bob. ");
+    }
+
+    #[test]
+    fn a_command_op_replays_with_its_selection() {
+        let (ta, tb) = MemoryTransport::pair("aaaaaaaa", "bbbbbbbb");
+        let mut a = session();
+        let mut b = session();
+        a.collab_attach("demo", "Alice", Box::new(ta));
+        b.collab_join("demo", "Bob", Box::new(tb));
+        b.collab_tick();
+        a.collab_tick();
+        b.collab_tick();
+
+        a.run("text.insert", &json!({"text": "Hello world"})).expect("A types");
+        b.collab_tick();
+        assert_eq!(b.doc.plain_text(StoryRef::Body), "Hello world");
+
+        // B bolds "world": the op carries B's selection, and A replays it.
+        b.run("select.text", &json!({"text": "world"})).expect("B selects");
+        b.run("format.bold", &json!({})).expect("B bolds");
+        a.collab_tick();
+        assert_eq!(a.doc.plain_text(StoryRef::Body), "Hello world");
+        let bold = |s: &Session, off: usize| s.doc.para(StoryRef::Body, &wordcraft_doc::Path::top(0)).and_then(|p| p.props_of_char(off).bold);
+        assert_eq!(bold(&b, 6), Some(true), "B bolded 'world'");
+        assert_eq!(bold(&a, 6), Some(true), "A replayed the bold");
+        assert_eq!(bold(&a, 0), None, "the text before it is untouched");
+        assert_eq!(bold(&a, 10), Some(true), "the whole word is bold");
     }
 
     #[test]

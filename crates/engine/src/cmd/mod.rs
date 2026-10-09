@@ -8,6 +8,7 @@ pub mod citations;
 pub mod column;
 pub mod connectors;
 pub mod controls;
+pub mod collab;
 pub mod design;
 pub mod draw;
 pub mod edit;
@@ -99,6 +100,7 @@ pub fn registry() -> Registry {
     v.extend(protect::specs());
     v.extend(speech::specs());
     v.extend(controls::specs());
+    v.extend(collab::specs());
     Registry::new(v)
 }
 

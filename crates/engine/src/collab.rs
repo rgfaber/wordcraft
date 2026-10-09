@@ -346,7 +346,7 @@ impl Session {
             let token = issuer.open_token(&c.doc, role, ttl_ms, now)?;
             (c.doc.clone(), issuer.node_id(), issuer.carried_key(), c.name.clone(), token)
         };
-        let invite = craft_collab::Invite {
+        let mut invite = craft_collab::Invite {
             v: craft_collab::INVITE_VERSION,
             doc,
             host,
@@ -359,6 +359,14 @@ impl Session {
             issued_ms: now,
             expires_ms: now.saturating_add(ttl_ms),
             token,
+            signature: Vec::new(),
+        };
+        // The envelope is signed by the host identity: the joiner can verify
+        // exactly who invited it, and that no field was swapped en route.
+        invite.signature = {
+            let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
+            let Some(issuer) = c.issuer.as_ref() else { return Err("this session is not the host".into()) };
+            issuer.sign(&invite.signed_bytes()?)?
         };
         invite.encode()
     }
@@ -1237,6 +1245,10 @@ mod tests {
         fn open_token(&self, doc: &str, role: craft_collab::Role, ttl_ms: u64, now_ms: u64) -> Result<craft_collab::SignedGrant, String> {
             self.issue(doc, "", role, ttl_ms, now_ms)
         }
+
+        fn sign(&self, _bytes: &[u8]) -> Result<Vec<u8>, String> {
+            Ok(b"isig".to_vec())
+        }
     }
 
     fn host_table() -> craft_collab::Access {
@@ -1357,6 +1369,33 @@ mod tests {
         host.collab_tick();
         assert_eq!(host.doc.plain_text(StoryRef::Body), "", "a revoked holder no longer lands");
         assert!(host.collab_stats()["unauthorized"].as_u64().unwrap_or(0) >= 1);
+    }
+
+    #[test]
+    fn a_minted_invite_carries_the_hosts_signature() {
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb"]);
+        let (ta, _) = (bus.remove(0), bus.remove(0));
+        let mut host = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        host.collab_set_access(host_table());
+        host.collab_set_issuer(Box::new(TestIssuer { host: "aaaaaaaa".into() }));
+        host.collab_set_share_context("cc".repeat(32).as_str(), "", "station.example:4433:dd", "pq_pure");
+
+        let line = host.collab_invite_from_context(craft_collab::Role::Editor, 60_000).expect("mint");
+        let invite = craft_collab::Invite::decode(&line).expect("decode");
+        assert_eq!(invite.v, craft_collab::INVITE_VERSION, "current version only");
+        assert!(!invite.signature.is_empty(), "the envelope is signed by the host");
+        assert_eq!(invite.host, "aaaaaaaa");
+        assert!(invite.is_live(now_ms()));
+        assert!(invite.token.grant.is_open(), "still an open token");
+
+        // And minting without a signing side is refused, never unsigned.
+        let mut bare = session();
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb"]);
+        let (tb, _) = (bus.remove(0), bus.remove(0));
+        bare.collab_attach("demo", "Host", Box::new(tb));
+        bare.collab_set_share_context("cc", "", "seed", "pq_pure");
+        assert!(bare.collab_invite_from_context(craft_collab::Role::Editor, 60_000).is_err());
     }
 
     #[test]

@@ -116,8 +116,10 @@ fn join_line(session: &mut Session, identity: &Identity, name: &str, line: &str)
         return Err("this invite has expired".into());
     }
     let transport = MeshTransport::connect(&mesh_config(&invite.seed, &invite.realm, &invite.realm_key)?, identity)?;
-    session.collab_set_access(macula_craft_collab::verified_access_from(&invite.doc, &invite.host_key, &invite.profile)?);
+    // Joining replaces the collaboration runtime, so the access table is
+    // installed after it (installing first would be wiped).
     session.collab_join_via_invite(&invite.doc, name, Box::new(transport), invite.token);
+    session.collab_set_access(macula_craft_collab::verified_access_from(&invite.doc, &invite.host_key, &invite.profile)?);
     Ok(())
 }
 

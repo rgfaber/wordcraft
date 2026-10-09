@@ -387,7 +387,9 @@ impl Session {
         } else if spec.id.starts_with("caret.") {
             self.typing_open = false;
         }
-        let collab_before = (local && spec.mutates && self.collab.is_some()).then(|| self.collab_text_map());
+        let capturing = local && spec.mutates && self.collab.is_some();
+        let collab_exact = capturing.then(|| self.collab_exact_plan(id, params)).flatten();
+        let collab_before = (capturing && collab_exact.is_none()).then(|| self.collab_text_map());
         let run = spec.run;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(self, params)));
         let result = match result {
@@ -404,7 +406,9 @@ impl Session {
                     self.doc.ensure_nonempty();
                 }
                 self.clamp_selection();
-                if let Some(before) = collab_before {
+                if let Some((pid, index, remove, insert)) = collab_exact {
+                    self.collab_apply_exact(pid, index, remove, insert);
+                } else if let Some(before) = collab_before {
                     self.collab_after(&before);
                 }
             }

@@ -8,6 +8,7 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod collab_setup;
 mod control_server;
 #[cfg(any(target_os = "windows", test))]
 mod graphics;
@@ -138,12 +139,14 @@ fn main() -> eframe::Result {
     let logger = logging::install();
     logging::install_panic_hook();
     let mut control_port: Option<u16> = std::env::var("WORDCRAFT_CONTROL_PORT").ok().and_then(|p| p.parse().ok());
+    let mut collab: Option<String> = None;
     let mut files = Vec::new();
     let mut sample = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--control" => control_port = args.next().and_then(|p| p.parse().ok()),
+            "--collab" => collab = args.next(),
             "--sample" => sample = true,
             "--version" => {
                 println!("wordcraft {} ({})", env!("CARGO_PKG_VERSION"), build_sha());
@@ -194,6 +197,11 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let doc = if sample { wordcraft_engine::sample::sample_document() } else { wordcraft_doc::Document::new() };
             let mut app = WordApp::new(Session::new(doc), services());
+            if let Some(path) = collab.as_deref()
+                && let Err(e) = collab_setup::attach(&mut app.session, path)
+            {
+                log::warn!("collab: {e}");
+            }
             load_prefs(&mut app);
             app.ui.window = restored;
             app.integrated_titlebar = cfg!(target_os = "macos");

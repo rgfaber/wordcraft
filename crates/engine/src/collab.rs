@@ -67,6 +67,9 @@ pub struct CollabRuntime {
     /// The mesh coordinates this host shares in: (realm, realm key, seed,
     /// signing profile). Opaque here; the invite carries them for a joiner.
     share: Option<(String, String, String, String)>,
+    /// Where the installed grants persist, when the app names a file: a
+    /// restarted host re-learns its holders from it.
+    grants_path: Option<std::path::PathBuf>,
 }
 
 impl CollabRuntime {
@@ -99,6 +102,7 @@ impl CollabRuntime {
             pending: std::collections::BTreeMap::new(),
             auto_approve: false,
             share: None,
+            grants_path: None,
         }
     }
 
@@ -213,6 +217,37 @@ impl Session {
             .and_then(|c| c.access.as_ref())
             .map(|a| a.holder_ids())
             .unwrap_or_default()
+    }
+
+    /// Names the file where installed grants persist (the app's choice),
+    /// and loads it: a restarted host re-learns its holders and a restarted
+    /// holder its own grant. Malformed or unverifiable entries are skipped;
+    /// persistence never takes the collaboration down.
+    pub fn collab_set_grants_path(&mut self, path: &str) {
+        let now = now_ms();
+        if let Some(c) = self.collab.as_mut() {
+            c.grants_path = Some(std::path::PathBuf::from(path));
+        }
+        let Ok(text) = std::fs::read_to_string(path) else { return };
+        let Ok(grants) = serde_json::from_str::<Vec<craft_collab::SignedGrant>>(&text) else { return };
+        if let Some(c) = self.collab.as_mut()
+            && let Some(access) = c.access.as_mut()
+        {
+            for signed in &grants {
+                let _ = access.install(signed, now);
+            }
+        }
+    }
+
+    /// Writes the installed grants to the persisted file, if one is named.
+    fn collab_save_grants(&self) {
+        let Some(c) = self.collab.as_ref() else { return };
+        let Some(path) = c.grants_path.as_ref() else { return };
+        let Some(access) = c.access.as_ref() else { return };
+        let grants = access.signed_grants();
+        if let Ok(json) = serde_json::to_string(&grants) {
+            let _ = std::fs::write(path, json);
+        }
     }
 
     /// Whether this session can mint invites (it is the host and knows its
@@ -598,6 +633,7 @@ impl Session {
                         c.snapshot_attempts = 0;
                     }
                 }
+                self.collab_save_grants();
             }
             craft_collab::Kind::Revoked { revocation } => {
                 let now = now_ms();
@@ -606,6 +642,7 @@ impl Session {
                 {
                     let _ = access.revoke(&revocation, now);
                 }
+                self.collab_save_grants();
             }
             // Handled before the access check: it is the door itself.
             craft_collab::Kind::JoinRequest { .. } => {}
@@ -654,6 +691,7 @@ impl Session {
             }
             c.pending.remove(holder);
         }
+        self.collab_save_grants();
     }
 
     /// Records one received-edit latency sample (skipped when the sender had
@@ -705,6 +743,7 @@ impl Session {
             "active": true,
             "doc": c.doc,
             "author": short(&c.author),
+            "authorId": c.author,
             "joined": !c.awaiting_snapshot,
             "seq": c.seq,
             "peers": peers,
@@ -1318,6 +1357,44 @@ mod tests {
         host.collab_tick();
         assert_eq!(host.doc.plain_text(StoryRef::Body), "", "a revoked holder no longer lands");
         assert!(host.collab_stats()["unauthorized"].as_u64().unwrap_or(0) >= 1);
+    }
+
+    #[test]
+    fn a_restarted_host_relearns_its_holders() {
+        let dir = std::env::temp_dir().join(format!("wc-grants-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("grants.json");
+        let _ = std::fs::remove_file(&path);
+        let file = path.to_string_lossy().to_string();
+
+        // The first host: Bob joins, the grant lands in the file.
+        {
+            let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb"]);
+            let (ta, tb) = (bus.remove(0), bus.remove(0));
+            let mut host = session();
+            let mut bob = session();
+            host.collab_attach("demo", "Host", Box::new(ta));
+            host.collab_set_access(host_table());
+            host.collab_set_grants_path(&file);
+            host.collab_set_issuer(Box::new(TestIssuer { host: "aaaaaaaa".into() }));
+            host.collab_set_auto_approve(true);
+            bob.collab_join_via_invite("demo", "Bob", Box::new(tb), token("aaaaaaaa", craft_collab::Role::Editor));
+            bob.collab_set_access(host_table());
+            bob.collab_tick();
+            host.collab_tick();
+            bob.collab_tick();
+            assert_eq!(host.collab_holders(), vec!["bbbbbbbb".to_string()]);
+        }
+
+        // A second, fresh host process: the holders come back from the file.
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb"]);
+        let (ta, _) = (bus.remove(0), bus.remove(0));
+        let mut host = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        host.collab_set_access(host_table());
+        host.collab_set_grants_path(&file);
+        assert_eq!(host.collab_holders(), vec!["bbbbbbbb".to_string()], "the restarted host re-learns its holders");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

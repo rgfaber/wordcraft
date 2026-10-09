@@ -202,20 +202,10 @@ impl Session {
     /// exact path did not take: its id, its params as JSON, and the
     /// selection it runs under (both ends as pid + offset), so a
     /// position-carrying command (a style change) is applied as it was
-    /// issued. `None` for commands that must not be shared (undo/redo, the
-    /// spiked collab/debug/UI commands).
+    /// issued. `None` for commands that must not be shared (see
+    /// [`replayable_command`]).
     pub(crate) fn collab_command_plan(&self, id: &str, params: &Value) -> Option<(String, Vec<u8>, Option<String>)> {
-        if matches!(id, "edit.undo" | "edit.redo" | "edit.repeat" | "text.insert" | "format.bold") {
-            return None;
-        }
-        if id.starts_with("collab.")
-            || id.starts_with("caret.")
-            || id.starts_with("select.")
-            || id.starts_with("view.")
-            || id.starts_with("ui.")
-            || id.starts_with("file.")
-            || id.starts_with("tools.")
-        {
+        if !replayable_command(id) {
             return None;
         }
         let bytes = serde_json::to_vec(params).ok()?;
@@ -344,6 +334,15 @@ impl Session {
             }
             craft_collab::Kind::Command { id, params, anchor } => {
                 self.collab_record_latency(&msg.author, msg.sent_at_ms);
+                // A holder may replay only the commands the local capture
+                // would ever send; anything else (file, tools, UI, undo) is
+                // refused on receive, whoever the author is.
+                if !replayable_command(&id) {
+                    if let Some(c) = self.collab.as_mut() {
+                        c.unauthorized += 1;
+                    }
+                    return;
+                }
                 // Replay under the command's own selection, but leave the
                 // local author's caret exactly as it was: the replay must
                 // not turn the next local typing into a replacement.
@@ -501,6 +500,20 @@ impl Session {
             .map(|p| PeerView { name: p.name.clone(), color: p.color, pos: p.position.as_deref().and_then(|s| cursor_pos(&self.doc, s)) })
             .collect()
     }
+}
+
+/// Whether a remote `Command` op may replay this command id: exactly the set
+/// the local capture emits (not undo/redo/repeat, not typing or the anchored
+/// bold, not the collab/debug/UI/file/tools/selection commands).
+pub(crate) fn replayable_command(id: &str) -> bool {
+    !(matches!(id, "edit.undo" | "edit.redo" | "edit.repeat" | "text.insert" | "format.bold")
+        || id.starts_with("collab.")
+        || id.starts_with("caret.")
+        || id.starts_with("select.")
+        || id.starts_with("view.")
+        || id.starts_with("ui.")
+        || id.starts_with("file.")
+        || id.starts_with("tools."))
 }
 
 /// Decodes an app cursor (`{"pid": n, "off": n}`) into a position in `doc`.
@@ -836,6 +849,39 @@ mod tests {
         assert_eq!(runs_of(&a), runs_of(&b), "runs stayed aligned after more typing");
     }
 
+    /// A verifier standing in for the adapter's key check: these engine
+    /// tests exercise the session's enforcement, while the install path's
+    /// crypto is exercised in the adapter's own tests.
+    struct TestVerifier;
+
+    impl craft_collab::GrantVerifier for TestVerifier {
+        fn verify(&self, signed: &craft_collab::SignedGrant, _now_ms: u64) -> Result<craft_collab::Grant, String> {
+            Ok(signed.grant.clone())
+        }
+    }
+
+    fn verified_table(host: &str, holder: &str, role: craft_collab::Role, expires_ms: u64) -> craft_collab::Access {
+        let mut a = craft_collab::Access::new("demo", host, std::sync::Arc::new(TestVerifier));
+        a.install(
+            &craft_collab::SignedGrant {
+                grant: craft_collab::Grant {
+                    v: craft_collab::GRANT_VERSION,
+                    doc: "demo".into(),
+                    host: host.into(),
+                    holder: holder.into(),
+                    role,
+                    issued_ms: 0,
+                    expires_ms,
+                    nonce: format!("n-{holder}"),
+                },
+                signature: vec![],
+            },
+            0,
+        )
+        .expect("install");
+        a
+    }
+
     #[test]
     fn a_stranger_cannot_edit_a_protected_document() {
         let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb", "cccccccc"]);
@@ -846,21 +892,7 @@ mod tests {
         host.collab_attach("demo", "Host", Box::new(ta));
         bob.collab_join("demo", "Bob", Box::new(tb));
         mallory.collab_attach("demo", "Mallory", Box::new(tm));
-        let table = || {
-            let mut a = craft_collab::Access::new("demo", "aaaaaaaa");
-            a.add(craft_collab::Grant {
-                v: 1,
-                doc: "demo".into(),
-                host: "aaaaaaaa".into(),
-                holder: "bbbbbbbb".into(),
-                role: craft_collab::Role::Editor,
-                issued_ms: 0,
-                expires_ms: u64::MAX,
-                nonce: "n-bob".into(),
-            })
-            .expect("grant");
-            a
-        };
+        let table = || verified_table("aaaaaaaa", "bbbbbbbb", craft_collab::Role::Editor, u64::MAX);
         host.collab_set_access(table());
         bob.collab_set_access(table());
         bob.collab_tick();
@@ -890,21 +922,7 @@ mod tests {
         let mut viewer = session();
         host.collab_attach("demo", "Host", Box::new(ta));
         viewer.collab_join("demo", "Vic", Box::new(tb));
-        let table = || {
-            let mut a = craft_collab::Access::new("demo", "aaaaaaaa");
-            a.add(craft_collab::Grant {
-                v: 1,
-                doc: "demo".into(),
-                host: "aaaaaaaa".into(),
-                holder: "bbbbbbbb".into(),
-                role: craft_collab::Role::Viewer,
-                issued_ms: 0,
-                expires_ms: u64::MAX,
-                nonce: "n-vic".into(),
-            })
-            .expect("grant");
-            a
-        };
+        let table = || verified_table("aaaaaaaa", "bbbbbbbb", craft_collab::Role::Viewer, u64::MAX);
         host.collab_set_access(table());
         viewer.collab_set_access(table());
         viewer.collab_tick();
@@ -929,7 +947,7 @@ mod tests {
         let mut host = session();
         let mut mallory = session();
         host.collab_attach("demo", "Host", Box::new(ta));
-        host.collab_set_access(craft_collab::Access::new("demo", "aaaaaaaa"));
+        host.collab_set_access(craft_collab::Access::new("demo", "aaaaaaaa", std::sync::Arc::new(TestVerifier)));
         mallory.collab_join("demo", "Mallory", Box::new(tm));
         mallory.collab_tick();
         host.collab_tick();
@@ -946,27 +964,22 @@ mod tests {
         let mut bob = session();
         host.collab_attach("demo", "Host", Box::new(ta));
         bob.collab_attach("demo", "Bob", Box::new(tb));
-        let table = || {
-            let mut a = craft_collab::Access::new("demo", "aaaaaaaa");
-            a.add(craft_collab::Grant {
-                v: 1,
-                doc: "demo".into(),
-                host: "aaaaaaaa".into(),
-                holder: "bbbbbbbb".into(),
-                role: craft_collab::Role::Editor,
-                issued_ms: 0,
-                expires_ms: 1, // long past
-                nonce: "n-expired".into(),
-            })
-            .expect("grant");
-            a
-        };
+        let table = || verified_table("aaaaaaaa", "bbbbbbbb", craft_collab::Role::Editor, 1);
         host.collab_set_access(table());
         bob.collab_set_access(table());
         bob.run("text.insert", &json!({"text": "late "})).expect("Bob types");
         host.collab_tick();
         assert_eq!(host.doc.plain_text(StoryRef::Body), "", "an expired grant denies the edit");
         assert_eq!(host.collab_stats()["unauthorized"], 1);
+    }
+
+    #[test]
+    fn only_replayable_commands_are_accepted() {
+        assert!(replayable_command("format.italic"), "a plain editing command replays");
+        assert!(replayable_command("text.newParagraph"));
+        for id in ["file.open", "tools.recordMacro", "ui.click", "edit.undo", "text.insert", "format.bold", "collab.stats", "view.zoom"] {
+            assert!(!replayable_command(id), "{id} must not replay");
+        }
     }
 
     #[test]

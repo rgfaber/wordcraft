@@ -389,7 +389,8 @@ impl Session {
         }
         let capturing = local && spec.mutates && self.collab.is_some();
         let collab_exact = capturing.then(|| self.collab_exact_plan(id, params)).flatten();
-        let collab_command = if capturing && collab_exact.is_none() { self.collab_command_plan(id, params) } else { None };
+        let collab_style = if capturing && collab_exact.is_none() { self.collab_style_plan(id, params) } else { None };
+        let collab_command = if capturing && collab_exact.is_none() && collab_style.is_none() { self.collab_command_plan(id, params) } else { None };
         let run = spec.run;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(self, params)));
         let result = match result {
@@ -408,6 +409,8 @@ impl Session {
                 self.clamp_selection();
                 if let Some((pid, index, remove, insert, props)) = collab_exact {
                     self.collab_apply_exact(pid, index, remove, insert, props);
+                } else if let Some((pid, index, len, bold)) = collab_style {
+                    self.collab_apply_style(pid, index, len, bold);
                 } else if let Some((cmd_id, cmd_params, anchor)) = collab_command {
                     self.collab_send_command(cmd_id, cmd_params, anchor);
                 }

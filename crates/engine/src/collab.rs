@@ -177,7 +177,7 @@ impl Session {
     /// issued. `None` for commands that must not be shared (undo/redo, the
     /// spiked collab/debug/UI commands).
     pub(crate) fn collab_command_plan(&self, id: &str, params: &Value) -> Option<(String, Vec<u8>, Option<String>)> {
-        if matches!(id, "edit.undo" | "edit.redo" | "edit.repeat" | "text.insert") {
+        if matches!(id, "edit.undo" | "edit.redo" | "edit.repeat" | "text.insert" | "format.bold") {
             return None;
         }
         if id.starts_with("collab.")
@@ -192,6 +192,56 @@ impl Session {
         }
         let bytes = serde_json::to_vec(params).ok()?;
         Some((id.to_string(), bytes, self.selection_json()))
+    }
+
+    /// The anchored style this command applies: only `format.bold` for now,
+    /// applied through the CRDT so it covers exactly its author's text.
+    pub(crate) fn collab_style_plan(&self, id: &str, params: &Value) -> Option<(u64, u32, u32, bool)> {
+        if id != "format.bold" {
+            return None;
+        }
+        let (a, b) = self.sel.ordered();
+        if a == b || a.story != b.story || a.path != b.path {
+            return None;
+        }
+        let para = self.doc.para_at(&a)?;
+        let (pid, len) = (para.pid, b.off.saturating_sub(a.off));
+        if pid == 0 || len == 0 {
+            return None;
+        }
+        let bold = match params.get("value").and_then(Value::as_bool) {
+            Some(v) => v,
+            None => (a.off..b.off).any(|i| para.props_of_char(i).bold != Some(true)),
+        };
+        Some((pid, a.off as u32, len as u32, bold))
+    }
+
+    /// Applies a captured bold to the CRDT, shares it, and aligns the local
+    /// runs to the CRDT's spans.
+    pub(crate) fn collab_apply_style(&mut self, pid: u64, index: u32, len: u32, bold: bool) {
+        let para = pid.to_string();
+        let update = match self.collab.as_mut() {
+            Some(c) => c.texts.local_bold(&para, index, len, bold),
+            None => return,
+        };
+        if let Some(update) = update
+            && let Some(c) = self.collab.as_mut()
+        {
+            c.send(craft_collab::Kind::TextEdit { para: para.clone(), update, props: None });
+        }
+        self.collab_sync_bold(pid);
+    }
+
+    /// Aligns a paragraph's bold to the CRDT's item-anchored spans: the
+    /// derivation every replica shares, so runs cover the same characters.
+    pub(crate) fn collab_sync_bold(&mut self, pid: u64) {
+        let spans = match self.collab.as_ref() {
+            Some(c) => c.texts.bold_spans(&pid.to_string()),
+            None => return,
+        };
+        if self.doc.set_paragraph_bold_by_pid(pid, &spans) {
+            self.touch();
+        }
     }
 
     /// Queues a captured command for the peers.
@@ -246,6 +296,9 @@ impl Session {
                     self.touch();
                     self.clamp_selection();
                 }
+                // The CRDT also carries the anchored formatting: derive
+                // runs from it, so every replica covers the same characters.
+                self.collab_sync_bold(pid);
             }
             craft_collab::Kind::Command { id, params, anchor } => {
                 self.collab_record_latency(&msg.author, msg.sent_at_ms);
@@ -389,6 +442,9 @@ impl Session {
         {
             self.touch();
             self.clamp_selection();
+        }
+        if let Ok(pid) = para.parse::<u64>() {
+            self.collab_sync_bold(pid);
         }
         true
     }
@@ -644,9 +700,10 @@ mod tests {
         b.collab_tick();
         let before = a.sel.clone();
 
-        // B bolds "Hello"; A replays it, but must not keep B's selection.
+        // B applies a position-carrying command (italic, still replayed as a
+        // Command op); A replays it, but must not keep B's selection.
         b.run("select.text", &json!({"text": "Hello"})).expect("B selects");
-        b.run("format.bold", &json!({})).expect("B bolds");
+        b.run("format.italic", &json!({})).expect("B italicises");
         a.collab_tick();
         assert_eq!(a.sel, before, "A's own caret was restored after the replay");
 
@@ -693,6 +750,46 @@ mod tests {
         assert_eq!(a.doc.plain_text(StoryRef::Body), c.doc.plain_text(StoryRef::Body), "A's typing reached C");
         b.collab_tick();
         assert_eq!(b.doc.plain_text(StoryRef::Body), a.doc.plain_text(StoryRef::Body), "B converges too");
+    }
+
+    #[test]
+    fn a_racing_bold_covers_the_same_text_on_every_replica() {
+        let (ta, tb) = MemoryTransport::pair("aaaaaaaa", "bbbbbbbb");
+        let mut a = session();
+        let mut b = session();
+        a.collab_attach("demo", "Alice", Box::new(ta));
+        b.collab_join("demo", "Bob", Box::new(tb));
+        b.collab_tick();
+        a.collab_tick();
+        b.collab_tick();
+
+        a.run("text.insert", &json!({"text": "Bravo. Alpha. "})).expect("A types");
+        b.collab_tick();
+
+        // The race: B bolds "Alpha." while A inserts "ONE " inside it,
+        // neither having heard the other yet.
+        b.run("select.text", &json!({"text": "Alpha."})).expect("B selects");
+        b.run("format.bold", &json!({})).expect("B bolds");
+        a.run("caret.set", &json!({"pos": {"story": "body", "path": [0], "off": 10}})).expect("A caret");
+        a.run("text.insert", &json!({"text": "ONE "})).expect("A inserts");
+
+        // Exchange both ways; then everything settles.
+        a.collab_tick();
+        b.collab_tick();
+        a.collab_tick();
+
+        assert_eq!(a.doc.plain_text(StoryRef::Body), b.doc.plain_text(StoryRef::Body), "text converged");
+        assert_eq!(runs_of(&a), runs_of(&b), "runs (coverage and segmentation) equal: the bold is anchored");
+
+        // Both sides type again at their own carets, as they did while Carol
+        // was partitioned: alignment must hold across further merges.
+        a.run("text.insert", &json!({"text": "PA. "})).expect("A types again");
+        b.run("text.insert", &json!({"text": "PB. "})).expect("B types again");
+        a.collab_tick();
+        b.collab_tick();
+        a.collab_tick();
+        assert_eq!(a.doc.plain_text(StoryRef::Body), b.doc.plain_text(StoryRef::Body), "text converged after more typing");
+        assert_eq!(runs_of(&a), runs_of(&b), "runs stayed aligned after more typing");
     }
 
     #[test]

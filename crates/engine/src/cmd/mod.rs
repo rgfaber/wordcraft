@@ -2,6 +2,7 @@
 
 pub mod caret;
 pub mod citations;
+pub mod collab;
 pub mod design;
 pub mod edit;
 pub mod file;
@@ -44,6 +45,7 @@ pub fn registry() -> Registry {
     v.extend(citations::specs());
     v.extend(objects::specs());
     v.extend(tools::specs());
+    v.extend(collab::specs());
     Registry::new(v)
 }
 

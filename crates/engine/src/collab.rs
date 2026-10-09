@@ -31,6 +31,10 @@ pub struct CollabRuntime {
     latency: HashMap<String, Vec<u64>>,
     /// Remote commands that failed to apply (a divergence signal).
     remote_errors: u64,
+    /// Messages dropped by the access check (stranger, expired, wrong role).
+    unauthorized: u64,
+    /// Who may act on this document, when access control is on.
+    access: Option<craft_collab::Access>,
     seq: u64,
     /// This process's epoch: a restart keeps its author id but sends a new
     /// epoch, so peers never confuse its restarted sequence with the old.
@@ -57,6 +61,8 @@ impl CollabRuntime {
             order: craft_collab::OrderBuffer::default(),
             latency: HashMap::new(),
             remote_errors: 0,
+            unauthorized: 0,
+            access: None,
             seq: 0,
             epoch: now_ms().wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (std::process::id() as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9),
             last_cursor: None,
@@ -132,6 +138,14 @@ impl Session {
     /// Whether this session is sharing its document.
     pub fn collab_active(&self) -> bool {
         self.collab.is_some()
+    }
+
+    /// Turns on access control for this document: only the host and live
+    /// grant holders act. Without it the session is open (spike mode).
+    pub fn collab_set_access(&mut self, access: craft_collab::Access) {
+        if let Some(c) = self.collab.as_mut() {
+            c.access = Some(access);
+        }
     }
 
     /// The exact edit a local command is about to make, when it is known
@@ -300,6 +314,16 @@ impl Session {
     }
 
     fn collab_receive(&mut self, msg: craft_collab::Message) {
+        // Access control, on every message: the host and live grant holders
+        // act; strangers, expired grants and role violations are dropped.
+        if let Some(admission) = self.collab.as_ref().and_then(|c| c.access.as_ref()).map(|a| a.admits(&msg.author, &msg.kind, now_ms()))
+            && !admission.is_admitted()
+        {
+            if let Some(c) = self.collab.as_mut() {
+                c.unauthorized += 1;
+            }
+            return;
+        }
         match msg.kind {
             craft_collab::Kind::TextEdit { para, update, props } => {
                 self.collab_record_latency(&msg.author, msg.sent_at_ms);
@@ -419,6 +443,8 @@ impl Session {
             "peers": peers,
             "latency": latency,
             "remoteErrors": c.remote_errors,
+            "unauthorized": c.unauthorized,
+            "access": c.access.is_some(),
         })
     }
 
@@ -808,6 +834,139 @@ mod tests {
         a.collab_tick();
         assert_eq!(a.doc.plain_text(StoryRef::Body), b.doc.plain_text(StoryRef::Body), "text converged after more typing");
         assert_eq!(runs_of(&a), runs_of(&b), "runs stayed aligned after more typing");
+    }
+
+    #[test]
+    fn a_stranger_cannot_edit_a_protected_document() {
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb", "cccccccc"]);
+        let (ta, tb, tm) = (bus.remove(0), bus.remove(0), bus.remove(0));
+        let mut host = session();
+        let mut bob = session();
+        let mut mallory = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        bob.collab_join("demo", "Bob", Box::new(tb));
+        mallory.collab_attach("demo", "Mallory", Box::new(tm));
+        let table = || {
+            let mut a = craft_collab::Access::new("demo", "aaaaaaaa");
+            a.add(craft_collab::Grant {
+                v: 1,
+                doc: "demo".into(),
+                host: "aaaaaaaa".into(),
+                holder: "bbbbbbbb".into(),
+                role: craft_collab::Role::Editor,
+                issued_ms: 0,
+                expires_ms: u64::MAX,
+                nonce: "n-bob".into(),
+            })
+            .expect("grant");
+            a
+        };
+        host.collab_set_access(table());
+        bob.collab_set_access(table());
+        bob.collab_tick();
+        host.collab_tick();
+        bob.collab_tick();
+
+        // Mallory holds no grant: her edit must not land.
+        mallory.run("text.insert", &json!({"text": "evil "})).expect("Mallory types");
+        host.collab_tick();
+        assert_eq!(host.doc.plain_text(StoryRef::Body), "", "the stranger's edit was dropped");
+        assert_eq!(host.collab_stats()["unauthorized"], 1);
+
+        // Bob is a live editor: his edit lands and converges.
+        bob.run("text.insert", &json!({"text": "good "})).expect("Bob types");
+        host.collab_tick();
+        assert_eq!(host.doc.plain_text(StoryRef::Body), "good ");
+        bob.collab_tick();
+        assert_eq!(bob.doc.plain_text(StoryRef::Body), "good ");
+        assert_eq!(host.collab_stats()["unauthorized"], 1, "no further drops");
+    }
+
+    #[test]
+    fn a_viewer_may_not_write_but_may_be_seen() {
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb"]);
+        let (ta, tb) = (bus.remove(0), bus.remove(0));
+        let mut host = session();
+        let mut viewer = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        viewer.collab_join("demo", "Vic", Box::new(tb));
+        let table = || {
+            let mut a = craft_collab::Access::new("demo", "aaaaaaaa");
+            a.add(craft_collab::Grant {
+                v: 1,
+                doc: "demo".into(),
+                host: "aaaaaaaa".into(),
+                holder: "bbbbbbbb".into(),
+                role: craft_collab::Role::Viewer,
+                issued_ms: 0,
+                expires_ms: u64::MAX,
+                nonce: "n-vic".into(),
+            })
+            .expect("grant");
+            a
+        };
+        host.collab_set_access(table());
+        viewer.collab_set_access(table());
+        viewer.collab_tick();
+        host.collab_tick();
+        viewer.collab_tick();
+
+        viewer.run("text.insert", &json!({"text": "nope "})).expect("the viewer tries to type");
+        host.collab_tick();
+        assert_eq!(host.doc.plain_text(StoryRef::Body), "", "a viewer's edit is dropped");
+        assert_eq!(host.collab_stats()["unauthorized"], 1);
+
+        viewer.collab_tick();
+        host.collab_tick();
+        let peers = host.collab_peers();
+        assert_eq!(peers.len(), 1, "the viewer's cursor gets through");
+    }
+
+    #[test]
+    fn a_snapshot_request_from_a_stranger_is_not_answered() {
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "cccccccc"]);
+        let (ta, tm) = (bus.remove(0), bus.remove(0));
+        let mut host = session();
+        let mut mallory = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        host.collab_set_access(craft_collab::Access::new("demo", "aaaaaaaa"));
+        mallory.collab_join("demo", "Mallory", Box::new(tm));
+        mallory.collab_tick();
+        host.collab_tick();
+        mallory.collab_tick();
+        assert_eq!(mallory.collab_stats()["joined"], false, "the stranger stays unjoined");
+        assert!(host.collab_stats()["unauthorized"].as_u64().unwrap_or(0) >= 1, "the request was refused");
+    }
+
+    #[test]
+    fn an_expired_grant_denies() {
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb"]);
+        let (ta, tb) = (bus.remove(0), bus.remove(0));
+        let mut host = session();
+        let mut bob = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        bob.collab_attach("demo", "Bob", Box::new(tb));
+        let table = || {
+            let mut a = craft_collab::Access::new("demo", "aaaaaaaa");
+            a.add(craft_collab::Grant {
+                v: 1,
+                doc: "demo".into(),
+                host: "aaaaaaaa".into(),
+                holder: "bbbbbbbb".into(),
+                role: craft_collab::Role::Editor,
+                issued_ms: 0,
+                expires_ms: 1, // long past
+                nonce: "n-expired".into(),
+            })
+            .expect("grant");
+            a
+        };
+        host.collab_set_access(table());
+        bob.collab_set_access(table());
+        bob.run("text.insert", &json!({"text": "late "})).expect("Bob types");
+        host.collab_tick();
+        assert_eq!(host.doc.plain_text(StoryRef::Body), "", "an expired grant denies the edit");
+        assert_eq!(host.collab_stats()["unauthorized"], 1);
     }
 
     #[test]

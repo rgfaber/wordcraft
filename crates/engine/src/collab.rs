@@ -17,6 +17,12 @@ use wordcraft_doc::{Document, Pos};
 
 use crate::{CmdError, Session};
 
+/// How long a grant issued on a join lasts, when the caller names nothing.
+const GRANT_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
+
+/// How many times a joiner asks for admission before giving up.
+const MAX_GRANT_ATTEMPTS: u32 = 5;
+
 /// Everything a shared session needs: the peers' transport, the text CRDT,
 /// the ordering buffer, the presence table and the latency samples.
 pub struct CollabRuntime {
@@ -45,6 +51,19 @@ pub struct CollabRuntime {
     /// How many snapshot requests have been sent, and when the last was.
     snapshot_attempts: u32,
     last_snapshot_ms: u64,
+    /// The host's signing side, when this session is the host: what mints
+    /// grants and revocations on a join.
+    issuer: Option<Box<dyn craft_collab::GrantIssuer>>,
+    /// A joiner's open token: presented until a grant arrives.
+    token: Option<craft_collab::SignedGrant>,
+    /// This joiner is waiting for its grant.
+    awaiting_grant: bool,
+    grant_attempts: u32,
+    last_grant_ms: u64,
+    /// Join requests waiting for the host's yes: node id -> (name, at_ms).
+    pending: std::collections::BTreeMap<String, (String, u64, craft_collab::Role)>,
+    /// Whether the host admits a valid token without asking.
+    auto_approve: bool,
 }
 
 impl CollabRuntime {
@@ -69,6 +88,13 @@ impl CollabRuntime {
             awaiting_snapshot: false,
             snapshot_attempts: 0,
             last_snapshot_ms: 0,
+            issuer: None,
+            token: None,
+            awaiting_grant: false,
+            grant_attempts: 0,
+            last_grant_ms: 0,
+            pending: std::collections::BTreeMap::new(),
+            auto_approve: false,
         }
     }
 
@@ -102,6 +128,10 @@ impl CollabRuntime {
 }
 
 /// Milliseconds since the epoch (0 where there is no clock).
+/// Milliseconds since the UNIX epoch, 0 on wasm: a clockless peer holds no
+/// live grant (grants require a wall clock to be live), so collaboration is
+/// only wired where a real clock exists (native builds; wasm has no
+/// transport).
 pub(crate) fn now_ms() -> u64 {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -146,6 +176,111 @@ impl Session {
         if let Some(c) = self.collab.as_mut() {
             c.access = Some(access);
         }
+    }
+
+    /// Installs the host's signing side: with it, this session answers join
+    /// requests with grants.
+    pub fn collab_set_issuer(&mut self, issuer: Box<dyn craft_collab::GrantIssuer>) {
+        if let Some(c) = self.collab.as_mut() {
+            c.issuer = Some(issuer);
+        }
+    }
+
+    /// Whether the host admits a valid token without asking (the UI leaves
+    /// this off and approves from `collab_pending`).
+    pub fn collab_set_auto_approve(&mut self, on: bool) {
+        if let Some(c) = self.collab.as_mut() {
+            c.auto_approve = on;
+        }
+    }
+
+    /// Joins `doc` through an invite: presents its open token until the host
+    /// grants this node, then asks for the snapshot.
+    pub fn collab_join_via_invite(
+        &mut self,
+        doc: &str,
+        name: &str,
+        transport: Box<dyn craft_collab::Transport>,
+        token: craft_collab::SignedGrant,
+    ) {
+        let mut runtime = CollabRuntime::new(doc, name, transport);
+        runtime.token = Some(token);
+        runtime.awaiting_grant = true;
+        self.collab = Some(runtime);
+    }
+
+    /// Join requests awaiting the host's yes: (node id, display name).
+    pub fn collab_pending(&self) -> Vec<(String, String)> {
+        self.collab
+            .as_ref()
+            .map(|c| c.pending.iter().map(|(node, (name, _, _))| (node.clone(), name.clone())).collect())
+            .unwrap_or_default()
+    }
+
+    /// The host approves a pending joiner: mints the grant from its token's
+    /// role, broadcasts it and installs it.
+    pub fn collab_approve(&mut self, node: &str) -> Result<(), String> {
+        let role = {
+            let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
+            let Some((_, _, role)) = c.pending.get(node) else {
+                return Err("no such pending joiner".into());
+            };
+            *role
+        };
+        if self.collab.as_ref().and_then(|c| c.issuer.as_ref()).is_none() {
+            return Err("this session is not the host".into());
+        }
+        self.collab_issue_grant(node, role, now_ms());
+        Ok(())
+    }
+
+    /// The host revokes a holder: signs it, broadcasts it, applies it.
+    pub fn collab_revoke(&mut self, node: &str) -> Result<(), String> {
+        let now = now_ms();
+        let signed = {
+            let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
+            let Some(issuer) = c.issuer.as_ref() else { return Err("this session is not the host".into()) };
+            issuer.revoke(&c.doc, node, now)?
+        };
+        if let Some(c) = self.collab.as_mut() {
+            c.send(craft_collab::Kind::Revoked { revocation: signed.clone() });
+            if let Some(access) = c.access.as_mut() {
+                let _ = access.revoke(&signed, now);
+            }
+            c.pending.remove(node);
+        }
+        Ok(())
+    }
+
+    /// Mints this host's invite for the document: `realm` and `seed` are the
+    /// mesh coordinates to share, verbatim. Returns the copyable line.
+    pub fn collab_mint_invite(
+        &mut self,
+        realm: &str,
+        seed: &str,
+        role: craft_collab::Role,
+        ttl_ms: u64,
+    ) -> Result<String, String> {
+        let now = now_ms();
+        let (doc, host, host_key, host_name, token) = {
+            let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
+            let Some(issuer) = c.issuer.as_ref() else { return Err("this session is not the host".into()) };
+            let token = issuer.open_token(&c.doc, role, ttl_ms, now)?;
+            (c.doc.clone(), issuer.node_id(), issuer.carried_key(), c.name.clone(), token)
+        };
+        let invite = craft_collab::Invite {
+            v: craft_collab::INVITE_VERSION,
+            doc,
+            host,
+            host_key: hex_bytes(&host_key),
+            host_name,
+            realm: realm.to_string(),
+            seed: seed.to_string(),
+            issued_ms: now,
+            expires_ms: now.saturating_add(ttl_ms),
+            token,
+        };
+        invite.encode()
     }
 
     /// The exact edit a local command is about to make, when it is known
@@ -288,6 +423,19 @@ impl Session {
         for msg in msgs {
             self.collab_receive(msg);
         }
+        // A joiner asks for admission until its grant arrives.
+        let now = now_ms();
+        if let Some(c) = self.collab.as_mut()
+            && c.awaiting_grant
+            && c.grant_attempts < MAX_GRANT_ATTEMPTS
+            && (c.grant_attempts == 0 || now.saturating_sub(c.last_grant_ms) >= 2_000)
+            && let Some(token) = c.token.clone()
+        {
+            c.grant_attempts += 1;
+            c.last_grant_ms = now;
+            c.send(craft_collab::Kind::JoinRequest { token, name: c.name.clone() });
+        }
+
         // A joiner asks for the shared document until it hears one back (a
         // publication can be lost; the request is cheap and idempotent).
         let now = now_ms();
@@ -304,6 +452,12 @@ impl Session {
     }
 
     fn collab_receive(&mut self, msg: craft_collab::Message) {
+        // A join request is the door: the host judges it by its token, not
+        // by a holder lookup (the joiner holds no grant yet).
+        if let craft_collab::Kind::JoinRequest { token, name } = &msg.kind {
+            self.collab_on_join_request(&msg.author, token, name);
+            return;
+        }
         // Access control, on every message: the host and live grant holders
         // act; strangers, expired grants and role violations are dropped.
         if let Some(admission) = self.collab.as_ref().and_then(|c| c.access.as_ref()).map(|a| a.admits(&msg.author, &msg.kind, now_ms()))
@@ -385,6 +539,75 @@ impl Session {
                     }
                 }
             }
+            craft_collab::Kind::GrantIssued { grant } => {
+                // Every replica installs it (the verifier decides); a joiner
+                // this grant names is admitted and may now ask for the doc.
+                let now = now_ms();
+                if let Some(c) = self.collab.as_mut() {
+                    if let Some(access) = c.access.as_mut() {
+                        let _ = access.install(&grant, now);
+                    }
+                    if c.awaiting_grant && grant.grant.holder == c.author {
+                        c.awaiting_grant = false;
+                        c.awaiting_snapshot = true;
+                        c.snapshot_attempts = 0;
+                    }
+                }
+            }
+            craft_collab::Kind::Revoked { revocation } => {
+                let now = now_ms();
+                if let Some(c) = self.collab.as_mut()
+                    && let Some(access) = c.access.as_mut()
+                {
+                    let _ = access.revoke(&revocation, now);
+                }
+            }
+            // Handled before the access check: it is the door itself.
+            craft_collab::Kind::JoinRequest { .. } => {}
+        }
+    }
+
+    /// The host judges a join request by its token: a valid open token gets
+    /// a concrete grant (auto-approved when configured, else queued for the
+    /// host's yes); an invalid one is refused and counted.
+    fn collab_on_join_request(&mut self, author: &str, token: &craft_collab::SignedGrant, name: &str) {
+        let now = now_ms();
+        let role = {
+            let Some(c) = self.collab.as_mut() else { return };
+            if c.issuer.is_none() {
+                return; // not the host: only the host admits
+            }
+            let Some(access) = c.access.as_ref() else { return };
+            match access.check_token(token, now) {
+                Ok(checked) => checked.role,
+                Err(_) => return,
+            }
+        };
+        let auto = matches!(&self.collab, Some(c) if c.auto_approve);
+        if auto {
+            self.collab_issue_grant(author, role, now);
+        } else if let Some(c) = self.collab.as_mut() {
+            c.pending.insert(author.to_string(), (name.to_string(), now, role));
+        }
+    }
+
+    /// Mints a grant for `holder` as the host, broadcasts it and installs it
+    /// locally.
+    fn collab_issue_grant(&mut self, holder: &str, role: craft_collab::Role, now: u64) {
+        let issued = {
+            let Some(c) = self.collab.as_ref() else { return };
+            let Some(issuer) = c.issuer.as_ref() else { return };
+            match issuer.issue(&c.doc, holder, role, GRANT_TTL_MS, now) {
+                Ok(signed) => signed,
+                Err(_) => return,
+            }
+        };
+        if let Some(c) = self.collab.as_mut() {
+            c.send(craft_collab::Kind::GrantIssued { grant: issued.clone() });
+            if let Some(access) = c.access.as_mut() {
+                let _ = access.install(&issued, now);
+            }
+            c.pending.remove(holder);
         }
     }
 
@@ -444,6 +667,8 @@ impl Session {
             "remoteErrors": c.remote_errors,
             "unauthorized": c.unauthorized,
             "access": c.access.is_some(),
+            "awaitingGrant": c.awaiting_grant,
+            "pending": c.pending.iter().map(|(node, (name, _, _))| json!({"node": short(node), "name": name})).collect::<Vec<_>>(),
         })
     }
 
@@ -544,6 +769,11 @@ fn selection_from(doc: &Document, encoded: &str) -> Option<crate::Selection> {
 /// The first eight hex characters of an author id, for reports.
 pub(crate) fn short(author: &str) -> String {
     author.chars().take(8).collect()
+}
+
+/// The hex form of bytes (keys, ids).
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The p-th percentile of a sorted, non-empty sample list (nearest rank).
@@ -858,7 +1088,285 @@ mod tests {
         fn verify(&self, signed: &craft_collab::SignedGrant, _now_ms: u64) -> Result<craft_collab::Grant, String> {
             Ok(signed.grant.clone())
         }
+
+        fn verify_revocation(
+            &self,
+            signed: &craft_collab::SignedRevocation,
+            _now_ms: u64,
+        ) -> Result<craft_collab::Revocation, String> {
+            Ok(signed.revocation.clone())
+        }
     }
+
+    /// A host that mints real grant structures for the join-flow tests; the
+    /// crypto itself is exercised in the adapter's tests.
+    struct TestIssuer {
+        host: String,
+    }
+
+    impl craft_collab::GrantIssuer for TestIssuer {
+        fn node_id(&self) -> String {
+            self.host.clone()
+        }
+
+        fn carried_key(&self) -> Vec<u8> {
+            vec![7; 32]
+        }
+
+        fn issue(
+            &self,
+            doc: &str,
+            holder: &str,
+            role: craft_collab::Role,
+            ttl_ms: u64,
+            now_ms: u64,
+        ) -> Result<craft_collab::SignedGrant, String> {
+            Ok(craft_collab::SignedGrant {
+                grant: craft_collab::Grant {
+                    v: craft_collab::GRANT_VERSION,
+                    doc: doc.to_string(),
+                    host: self.host.clone(),
+                    holder: holder.to_string(),
+                    role,
+                    issued_ms: now_ms,
+                    expires_ms: now_ms.saturating_add(ttl_ms),
+                    nonce: craft_collab::mint_nonce(now_ms, 1),
+                },
+                signature: vec![],
+            })
+        }
+
+        fn revoke(&self, doc: &str, holder: &str, now_ms: u64) -> Result<craft_collab::SignedRevocation, String> {
+            Ok(craft_collab::SignedRevocation {
+                revocation: craft_collab::Revocation {
+                    v: craft_collab::GRANT_VERSION,
+                    doc: doc.to_string(),
+                    host: self.host.clone(),
+                    holder: holder.to_string(),
+                    issued_ms: now_ms,
+                    nonce: craft_collab::mint_nonce(now_ms, 1),
+                },
+                signature: vec![],
+            })
+        }
+
+        fn open_token(&self, doc: &str, role: craft_collab::Role, ttl_ms: u64, now_ms: u64) -> Result<craft_collab::SignedGrant, String> {
+            self.issue(doc, "", role, ttl_ms, now_ms)
+        }
+    }
+
+    fn host_table() -> craft_collab::Access {
+        craft_collab::Access::new("demo", "aaaaaaaa", std::sync::Arc::new(TestVerifier))
+    }
+
+    fn token(host: &str, role: craft_collab::Role) -> craft_collab::SignedGrant {
+        craft_collab::GrantIssuer::open_token(&TestIssuer { host: host.to_string() }, "demo", role, 60_000, now_ms())
+            .expect("token")
+    }
+
+    #[test]
+    fn a_join_with_an_invite_is_granted_and_receives_the_document() {
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb"]);
+        let (ta, tb) = (bus.remove(0), bus.remove(0));
+        let mut host = session();
+        let mut bob = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        host.collab_set_access(host_table());
+        host.collab_set_issuer(Box::new(TestIssuer { host: "aaaaaaaa".into() }));
+        host.collab_set_auto_approve(true);
+        host.run("text.insert", &json!({"text": "hello "})).expect("Host types");
+
+        bob.collab_join_via_invite("demo", "Bob", Box::new(tb), token("aaaaaaaa", craft_collab::Role::Editor));
+        bob.collab_set_access(host_table());
+
+        bob.collab_tick(); // the join request goes out
+        host.collab_tick(); // the host admits: the grant is issued
+        bob.collab_tick(); // the grant lands here: the snapshot request goes out
+        host.collab_tick(); // the host answers the snapshot
+        bob.collab_tick(); // the snapshot lands
+
+        assert_eq!(bob.collab_stats()["joined"], true, "the joiner is admitted end to end");
+        assert_eq!(bob.doc.plain_text(StoryRef::Body), "hello ");
+
+        bob.run("caret.set", &json!({"pos": {"story": "body", "path": [0], "off": 6}})).expect("Bob's caret");
+        bob.run("text.insert", &json!({"text": "world"})).expect("Bob types back");
+        host.collab_tick();
+        assert_eq!(host.doc.plain_text(StoryRef::Body), "hello world", "a granted joiner edits the shared doc");
+        bob.collab_tick();
+        assert_eq!(bob.doc.plain_text(StoryRef::Body), "hello world");
+    }
+
+    #[test]
+    fn a_join_request_with_a_token_for_another_host_is_refused() {
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb"]);
+        let (ta, tb) = (bus.remove(0), bus.remove(0));
+        let mut host = session();
+        let mut bob = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        host.collab_set_access(host_table());
+        host.collab_set_issuer(Box::new(TestIssuer { host: "aaaaaaaa".into() }));
+        host.collab_set_auto_approve(true);
+
+        bob.collab_join_via_invite("demo", "Bob", Box::new(tb), token("cccccccc", craft_collab::Role::Editor));
+        bob.collab_set_access(host_table());
+        bob.collab_tick();
+        host.collab_tick();
+        bob.collab_tick();
+
+        assert_eq!(host.collab_stats()["unauthorized"], 1, "the forged token is refused at the door");
+        assert_eq!(bob.collab_stats()["awaitingGrant"], true, "the joiner is still waiting");
+        assert_eq!(bob.doc.plain_text(StoryRef::Body), "", "and received no document");
+    }
+
+    #[test]
+    fn the_host_approves_a_pending_joiner_by_hand() {
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb"]);
+        let (ta, tb) = (bus.remove(0), bus.remove(0));
+        let mut host = session();
+        let mut bob = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        host.collab_set_access(host_table());
+        host.collab_set_issuer(Box::new(TestIssuer { host: "aaaaaaaa".into() }));
+        // auto_approve stays off: this is the UI's path.
+
+        bob.collab_join_via_invite("demo", "Bob", Box::new(tb), token("aaaaaaaa", craft_collab::Role::Editor));
+        bob.collab_set_access(host_table());
+        bob.collab_tick();
+        host.collab_tick();
+
+        let pending = host.collab_pending();
+        assert_eq!(pending.len(), 1, "the request waits for a yes");
+        assert_eq!(pending[0], ("bbbbbbbb".to_string(), "Bob".to_string()));
+
+        host.collab_approve("bbbbbbbb").expect("approve");
+        assert!(host.collab_pending().is_empty(), "approved, no longer pending");
+        bob.collab_tick();
+        host.collab_tick();
+        bob.collab_tick();
+        assert_eq!(bob.collab_stats()["joined"], true, "the hand-approved joiner lands");
+    }
+
+    #[test]
+    fn revoking_a_holder_stops_their_edits_everywhere() {
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb"]);
+        let (ta, tb) = (bus.remove(0), bus.remove(0));
+        let mut host = session();
+        let mut bob = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        host.collab_set_access(host_table());
+        host.collab_set_issuer(Box::new(TestIssuer { host: "aaaaaaaa".into() }));
+        host.collab_set_auto_approve(true);
+        bob.collab_join_via_invite("demo", "Bob", Box::new(tb), token("aaaaaaaa", craft_collab::Role::Editor));
+        bob.collab_set_access(host_table());
+        bob.collab_tick();
+        host.collab_tick();
+        bob.collab_tick();
+        host.collab_tick();
+        bob.collab_tick();
+        assert_eq!(bob.collab_stats()["joined"], true);
+
+        host.collab_revoke("bbbbbbbb").expect("revoke");
+        bob.collab_tick(); // the joiner applies its own revocation
+        host.collab_tick();
+
+        bob.run("text.insert", &json!({"text": "still here "})).expect("Bob types");
+        host.collab_tick();
+        assert_eq!(host.doc.plain_text(StoryRef::Body), "", "a revoked holder no longer lands");
+        assert!(host.collab_stats()["unauthorized"].as_u64().unwrap_or(0) >= 1);
+    }
+
+    #[test]
+    fn a_refused_command_is_dropped_on_the_receive_path() {
+        use craft_collab::Transport as _;
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb"]);
+        let (ta, mut tb) = (bus.remove(0), bus.remove(0));
+        let mut host = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        host.collab_set_access(verified_table("aaaaaaaa", "bbbbbbbb", craft_collab::Role::Editor, u64::MAX));
+
+        // The holder skips its own capture and puts a raw, non-replayable
+        // command on the wire, as a modified peer would.
+        tb.send(craft_collab::Message {
+            doc: "demo".into(),
+            author: "bbbbbbbb".into(),
+            epoch: 1,
+            seq: 1,
+            sent_at_ms: now_ms(),
+            kind: craft_collab::Kind::Command {
+                id: "file.open".into(),
+                params: serde_json::to_vec(&json!({"path": "x"})).expect("json"),
+                anchor: None,
+            },
+        })
+        .expect("send");
+        host.collab_tick();
+        assert_eq!(host.collab_stats()["unauthorized"], 1, "the refused command is dropped, not applied");
+
+        // The same holder's replayable command still applies.
+        tb.send(craft_collab::Message {
+            doc: "demo".into(),
+            author: "bbbbbbbb".into(),
+            epoch: 1,
+            seq: 2,
+            sent_at_ms: now_ms(),
+            kind: craft_collab::Kind::Command {
+                id: "text.newParagraph".into(),
+                params: serde_json::to_vec(&json!({})).expect("json"),
+                anchor: None,
+            },
+        })
+        .expect("send");
+        host.collab_tick();
+        assert_eq!(host.collab_stats()["unauthorized"], 1, "the replayable command is not dropped");
+        assert_eq!(host.doc.para_paths(StoryRef::Body).len(), 2, "and it applied: the paragraph split");
+    }
+
+    #[test]
+    fn a_holder_answers_a_joiners_snapshot_not_only_the_host() {
+        // The joiner's only reachable peer is another holder: catch-up must
+        // not depend on the host being present.
+        let mut bus = MemoryTransport::bus(&["bbbbbbbb", "cccccccc"]);
+        let (tb, tc) = (bus.remove(0), bus.remove(0));
+        let mut bea = session();
+        bea.collab_attach("demo", "Bea", Box::new(tb));
+        bea.run("text.insert", &json!({"text": "carried "})).expect("Bea types");
+        let table = || {
+            let mut a = craft_collab::Access::new("demo", "aaaaaaaa", std::sync::Arc::new(TestVerifier));
+            for (holder, role) in [("bbbbbbbb", craft_collab::Role::Editor), ("cccccccc", craft_collab::Role::Editor)] {
+                a.install(
+                    &craft_collab::SignedGrant {
+                        grant: craft_collab::Grant {
+                            v: craft_collab::GRANT_VERSION,
+                            doc: "demo".into(),
+                            host: "aaaaaaaa".into(),
+                            holder: holder.into(),
+                            role,
+                            issued_ms: 0,
+                            expires_ms: u64::MAX,
+                            nonce: format!("n-{holder}"),
+                        },
+                        signature: vec![],
+                    },
+                    0,
+                )
+                .expect("install");
+            }
+            a
+        };
+        bea.collab_set_access(table());
+
+        let mut cy = session();
+        cy.collab_join("demo", "Cy", Box::new(tc));
+        cy.collab_set_access(table());
+        cy.collab_tick(); // the request reaches the holder
+        bea.collab_tick(); // the holder answers
+        cy.collab_tick(); // the joiner loads it
+
+        assert_eq!(cy.collab_stats()["joined"], true, "a holder carries the joiner");
+        assert_eq!(cy.doc.plain_text(StoryRef::Body), "carried ");
+    }
+
+
 
     fn verified_table(host: &str, holder: &str, role: craft_collab::Role, expires_ms: u64) -> craft_collab::Access {
         let mut a = craft_collab::Access::new("demo", host, std::sync::Arc::new(TestVerifier));

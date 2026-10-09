@@ -30,6 +30,8 @@ wordcraft-ui-egui = { path = "crates/ui-egui" }
 wordcraft-metafile = { path = "crates/metafile" }
 # the shared Craft collaboration seam (spike branch in the craft-libs fork)
 craft-collab = { path = "../craft-libs/crates/collab" }
+# its mesh transport (local spike repo, macula-rust released crates only)
+macula-craft-collab = { path = "../../macula-io/macula-craft-collab" }
 
 # foundation
 kurbo = { version = "0.13", features = ["serde"] }

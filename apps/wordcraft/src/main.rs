@@ -13,6 +13,7 @@ mod animations;
 #[cfg(target_os = "macos")]
 mod apple_events;
 mod clipboard;
+mod collab_setup;
 mod control_server;
 mod default_apps;
 mod file_dialogs;
@@ -230,12 +231,14 @@ fn main() -> eframe::Result {
     let logger = logging::install();
     logging::install_panic_hook();
     let mut control_port: Option<u16> = std::env::var("WORDCRAFT_CONTROL_PORT").ok().and_then(|p| p.parse().ok());
+    let mut collab: Option<String> = None;
     let mut files = Vec::new();
     let mut sample = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--control" => control_port = args.next().and_then(|p| p.parse().ok()),
+            "--collab" => collab = args.next(),
             "--sample" => sample = true,
             "--version" => {
                 println!("wordcraft {} ({})", env!("CARGO_PKG_VERSION"), build_sha());
@@ -311,6 +314,11 @@ fn main() -> eframe::Result {
             let mut session = Session::new(doc);
             session.system_region = region;
             let mut app = WordApp::new(session, services(file_dialog, &cc.egui_ctx));
+            if let Some(path) = collab.as_deref()
+                && let Err(e) = collab_setup::attach(&mut app.session, path)
+            {
+                log::warn!("collab: {e}");
+            }
             load_prefs(&mut app);
             load_user_dictionary(&mut app);
             // A region chosen in File › Options replaces the system's for the first blank

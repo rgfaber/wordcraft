@@ -1214,7 +1214,9 @@ impl Session {
             self.pending_move = None;
         }
         let sel_before = self.sel.clone();
-        let collab_before = (local && spec.mutates && self.collab.is_some()).then(|| self.collab_text_map());
+        let capturing = local && spec.mutates && self.collab.is_some();
+        let collab_exact = capturing.then(|| self.collab_exact_plan(id, params)).flatten();
+        let collab_before = (capturing && collab_exact.is_none()).then(|| self.collab_text_map());
         let run = spec.run;
         let mutates = spec.mutates;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::cmd::column::dispatch(self, id, mutates, run, params)));
@@ -1263,7 +1265,9 @@ impl Session {
                 if !matches!(id, "select.addObject" | "arrange.ungroup") && (spec.mutates || self.sel != sel_before) {
                     self.also_selected.clear();
                 }
-                if let Some(before) = collab_before {
+                if let Some((pid, index, remove, insert)) = collab_exact {
+                    self.collab_apply_exact(pid, index, remove, insert);
+                } else if let Some(before) = collab_before {
                     self.collab_after(&before);
             }
             Err(e) => {

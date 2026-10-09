@@ -32,12 +32,13 @@ pub struct CollabRuntime {
 impl CollabRuntime {
     fn new(doc: &str, name: &str, transport: Box<dyn craft_collab::Transport>) -> CollabRuntime {
         let author = transport.author();
+        let texts = craft_collab::TextMerge::new(&author);
         CollabRuntime {
             doc: doc.to_string(),
             name: name.to_string(),
             author,
             transport,
-            texts: craft_collab::TextMerge::new(),
+            texts,
             presence: craft_collab::Presence::default(),
             seq: 0,
             last_cursor: None,
@@ -106,6 +107,52 @@ impl Session {
             story(StoryRef::Part(id), &self.doc, &mut out);
         }
         out
+    }
+
+    /// The exact edit a local command is about to make, when it is known
+    /// (typing): paragraph, byte index, replaced length, text. `None` falls
+    /// back to the text-diff capture.
+    pub(crate) fn collab_exact_plan(&self, id: &str, params: &Value) -> Option<(u64, u32, u32, String)> {
+        if id != "text.insert" {
+            return None;
+        }
+        let text = params.get("text").and_then(Value::as_str)?;
+        if text.contains(['\r', '\u{2029}']) {
+            return None;
+        }
+        let (a, b) = self.sel.ordered();
+        if a.story != b.story || a.path != b.path {
+            return None;
+        }
+        let pid = self.doc.para_at(&a)?.pid;
+        if pid == 0 {
+            return None;
+        }
+        Some((pid, a.off as u32, (b.off - a.off) as u32, text.to_string()))
+    }
+
+    /// Applies a captured exact edit to the CRDT and shares it, healing any
+    /// difference between the CRDT and the document (autocorrect and the
+    /// like) in the same step.
+    pub(crate) fn collab_apply_exact(&mut self, pid: u64, index: u32, remove: u32, insert: String) {
+        let para = pid.to_string();
+        let Some(doc_text) = self.doc.paragraph_by_pid(pid).and_then(|(s, p)| self.doc.para(s, &p).map(|p| p.text.clone())) else {
+            return;
+        };
+        let mut updates = Vec::new();
+        if let Some(c) = self.collab.as_mut() {
+            if let Some(u) = c.texts.local_edit_exact(&para, index, remove, &insert) {
+                updates.push(u);
+            }
+            if let Some(u) = c.texts.sync(&para, &doc_text) {
+                updates.push(u);
+            }
+        }
+        for update in updates {
+            if let Some(c) = self.collab.as_mut() {
+                c.send(craft_collab::Kind::TextEdit { para: para.clone(), update });
+            }
+        }
     }
 
     /// Turns a successful local command's paragraph text changes into CRDT
@@ -335,6 +382,43 @@ mod tests {
         a.collab_tick();
         assert_eq!(a.doc.plain_text(StoryRef::Body), "");
         assert_eq!(b.doc.plain_text(StoryRef::Body), "");
+    }
+
+    #[test]
+    fn demo_sequence_keeps_per_author_undo() {
+        let (ta, tb) = MemoryTransport::pair("aaaaaaaa", "bbbbbbbb");
+        let mut a = session();
+        let mut b = session();
+        a.collab_attach("demo", "Alice", Box::new(ta));
+        b.collab_join("demo", "Bob", Box::new(tb));
+        b.collab_tick();
+        a.collab_tick();
+        b.collab_tick();
+
+        a.run("text.insert", &json!({"text": "Hello from Alice. "})).expect("A types");
+        b.collab_tick();
+        b.run("text.insert", &json!({"text": "Hi from Bob. "})).expect("B types");
+        a.collab_tick();
+        b.collab_tick();
+        assert_eq!(a.doc.plain_text(StoryRef::Body), b.doc.plain_text(StoryRef::Body));
+
+        // A undoes through the command, exactly as the app does.
+        a.run("edit.undo", &json!({})).expect("A undoes");
+        b.collab_tick();
+        assert_eq!(a.doc.plain_text(StoryRef::Body), "Hi from Bob. ", "only A's text went");
+        assert_eq!(b.doc.plain_text(StoryRef::Body), "Hi from Bob. ");
+
+        // B types again, after hearing A's undo.
+        b.run("text.insert", &json!({"text": "XYZ. "})).expect("B types again");
+        a.collab_tick();
+        assert_eq!(a.doc.plain_text(StoryRef::Body), "Hi from Bob. XYZ. ", "B's typing reached A");
+        assert_eq!(b.doc.plain_text(StoryRef::Body), "Hi from Bob. XYZ. ");
+
+        // And B's undo takes back only B's text.
+        b.run("edit.undo", &json!({})).expect("B undoes");
+        a.collab_tick();
+        assert_eq!(b.doc.plain_text(StoryRef::Body), "Hi from Bob. ", "only B's text went");
+        assert_eq!(a.doc.plain_text(StoryRef::Body), "Hi from Bob. ");
     }
 
     #[test]

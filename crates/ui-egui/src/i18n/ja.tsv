@@ -34,6 +34,7 @@
 	Alt Text	代替テキスト
 	Apply Character Style	文字スタイルを適用
 	Apply Style	スタイルを適用
+	Approve a Joiner	参加者を承認
 	Arrange	配置
 	Arrange\nAll	整列
 	Arrow	矢印
@@ -111,6 +112,7 @@
 	Clipboard	クリップボード
 	Close	閉じる
 	Close Header and Footer	ヘッダーとフッターを閉じる
+	Collaboration Status	コラボレーションの状態
 	Collapse Selection	選択範囲を縮小
 	Color	色
 	Color:	色:
@@ -169,6 +171,9 @@
 	Delete Style	スタイルの削除
 	Delete Table	表の削除
 	Design	デザイン
+	Invite to Document	文書に招待
+	Pending Join Requests	保留中の参加リクエスト
+	Revoke a Holder	アクセス権を取り消す
 	development build	開発ビルド
 	Diagonal	対角線
 	Diamond	ひし形

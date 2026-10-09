@@ -35,6 +35,7 @@
 	Alt Text	替代文字
 	Apply Character Style	套用字元樣式
 	Apply Style	套用樣式
+	Approve a Joiner	批准加入者
 	Arrange	排列
 	Arrange\nAll	全部排列
 	Arrow	箭號
@@ -112,6 +113,7 @@
 	Clipboard	剪貼簿
 	Close	關閉
 	Close Header and Footer	關閉頁首及頁尾
+	Collaboration Status	協作狀態
 	Collapse Selection	摺疊選取範圍
 	Color	色彩
 	Color:	色彩：
@@ -170,6 +172,9 @@
 	Delete Style	刪除樣式
 	Delete Table	刪除表格
 	Design	設計
+	Invite to Document	邀請加入文件
+	Pending Join Requests	待處理的加入要求
+	Revoke a Holder	撤銷存取權限
 	development build	開發版本
 	Diagonal	斜向
 	Diamond	菱形

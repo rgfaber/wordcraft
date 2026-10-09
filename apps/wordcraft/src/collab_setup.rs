@@ -1,6 +1,6 @@
 //! `--collab <config.json>`: attach this instance to a document shared over the mesh.
 //!
-//! The config (spike format):
+//! The config (spike format), host side:
 //! ```json
 //! {
 //!   "station": "<host>:<port>:<station node id hex>",
@@ -10,28 +10,50 @@
 //!   "name": "Alice",
 //!   "identity": "alice",
 //!   "join": false,
+//!   "auto_approve": true,
 //!   "profile": "pq_hybrid"
 //! }
+//! ```
+//! and joiner side, with an invite line from the host instead of the raw
+//! coordinates:
+//! ```json
+//! { "name": "Bob", "identity": "bob", "invite": "{...}" }
 //! ```
 //! `identity` is the storage slug of this person's persistent Craft key (one
 //! key per person per device, shared by every Craft app; secure store, file
 //! fallback headless). `join` makes this instance ask a peer for the document
-//! snapshot first; without it, the instance shares its own document.
+//! snapshot first; without it, the instance shares its own document. A host
+//! instance answers join requests with grants (`auto_approve` skips the
+//! manual yes; the app's Share window approves by hand).
 
 use serde::Deserialize;
 use wordcraft_engine::Session;
 
+use macula_craft_collab::{Identity, IdentityIssuer, MeshConfig, MeshTransport};
+
 #[derive(Deserialize)]
 struct Config {
+    /// `<host>:<port>:<station node id hex>`; also what an invite carries.
+    #[serde(default)]
     station: String,
+    #[serde(default)]
     realm: String,
+    #[serde(default)]
     realm_key: String,
+    #[serde(default)]
     doc: String,
     name: String,
     #[serde(default = "default_identity")]
     identity: String,
     #[serde(default)]
     join: bool,
+    /// The host admits a valid invite token without asking by hand.
+    #[serde(default)]
+    auto_approve: bool,
+    /// An invite line: join through the invite flow instead of the raw
+    /// station/realm fields.
+    #[serde(default)]
+    invite: Option<String>,
     #[serde(default = "default_profile")]
     profile: String,
 }
@@ -48,25 +70,62 @@ fn default_profile() -> String {
 pub fn attach(session: &mut Session, path: &str) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let cfg: Config = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
-    let mut parts = cfg.station.rsplitn(3, ':');
-    let (Some(node_hex), Some(port), Some(host)) = (parts.next(), parts.next(), parts.next()) else {
-        return Err(format!("{path}: station must be host:port:node_hex"));
-    };
-    let identity = macula_craft_collab::Identity::load_or_create(&cfg.profile, &cfg.identity, &cfg.name)?;
-    let mesh = macula_craft_collab::MeshConfig {
-        host: host.to_string(),
-        port: port.parse::<u16>().map_err(|e| format!("{path}: {e}"))?,
-        station_node_id: hex32(node_hex).map_err(|e| format!("{path}: station node id: {e}"))?,
-        realm_id: hex32(&cfg.realm).map_err(|e| format!("{path}: realm: {e}"))?,
-        realm_key: hex_bytes(&cfg.realm_key).map_err(|e| format!("{path}: realm key: {e}"))?,
-    };
-    let transport = macula_craft_collab::MeshTransport::connect(&mesh, &identity)?;
+    let identity = Identity::load_or_create(&cfg.profile, &cfg.identity, &cfg.name)?;
+    if let Some(line) = &cfg.invite {
+        join_line(session, &identity, &cfg.name, line)?;
+        return Ok(());
+    }
+    if cfg.station.is_empty() || cfg.realm.is_empty() {
+        return Err(format!("{path}: station and realm are required without an invite"));
+    }
+    let transport = MeshTransport::connect(&mesh_config(&cfg.station, &cfg.realm, &cfg.realm_key)?, &identity)?;
     if cfg.join {
         session.collab_join(&cfg.doc, &cfg.name, Box::new(transport));
     } else {
         session.collab_attach(&cfg.doc, &cfg.name, Box::new(transport));
+        session.collab_set_access(identity.verified_access(&cfg.doc));
+        session.collab_set_issuer(Box::new(IdentityIssuer::new(identity.clone())));
+        session.collab_set_auto_approve(cfg.auto_approve);
+        session.collab_set_share_context(&cfg.realm, &cfg.realm_key, &cfg.station, &cfg.profile);
     }
     Ok(())
+}
+
+/// Joins through an invite line (the app's Share window, or a config): the
+/// invite names the document, the host and its key, the realm and a seed
+/// station, plus the host-signed open token this instance presents.
+pub fn join_from_invite(session: &mut Session, invite_line: &str, name: &str) -> Result<(), String> {
+    let identity = Identity::load_or_create("pq_hybrid", "default", name)?;
+    join_line(session, &identity, name, invite_line)
+}
+
+fn join_line(session: &mut Session, identity: &Identity, name: &str, line: &str) -> Result<(), String> {
+    let invite = craft_collab::Invite::decode(line.trim())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if !invite.is_live(now) {
+        return Err("this invite has expired".into());
+    }
+    let transport = MeshTransport::connect(&mesh_config(&invite.seed, &invite.realm, &invite.realm_key)?, identity)?;
+    session.collab_set_access(macula_craft_collab::verified_access_from(&invite.doc, &invite.host_key, &invite.profile)?);
+    session.collab_join_via_invite(&invite.doc, name, Box::new(transport), invite.token);
+    Ok(())
+}
+
+fn mesh_config(seed: &str, realm: &str, realm_key: &str) -> Result<MeshConfig, String> {
+    let mut parts = seed.rsplitn(3, ':');
+    let (Some(node_hex), Some(port), Some(host)) = (parts.next(), parts.next(), parts.next()) else {
+        return Err("a station seed must be host:port:node_hex".into());
+    };
+    Ok(MeshConfig {
+        host: host.to_string(),
+        port: port.parse::<u16>().map_err(|e| format!("station port: {e}"))?,
+        station_node_id: hex32(node_hex).map_err(|e| format!("station node id: {e}"))?,
+        realm_id: hex32(realm).map_err(|e| format!("realm: {e}"))?,
+        realm_key: hex_bytes(realm_key).map_err(|e| format!("realm key: {e}"))?,
+    })
 }
 
 fn hex_bytes(s: &str) -> Result<Vec<u8>, String> {

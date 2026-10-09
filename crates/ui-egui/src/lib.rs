@@ -27,6 +27,7 @@ pub mod previews;
 pub mod ribbon;
 pub mod theme;
 pub mod widgets;
+pub mod share;
 pub mod window_geometry;
 
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,9 @@ pub struct Services {
     pub inbox: Option<Inbox>,
     /// Web: hand bytes to the browser as a download.
     pub download: Option<Box<dyn Fn(&str, &[u8])>>,
+    /// Join through an invite line (app-injected: the app owns the mesh
+    /// adapter). `(session, invite line, display name)`.
+    pub join_invite: Option<Box<dyn Fn(&mut Session, &str, &str) -> Result<(), String>>>,
 }
 
 /// Files delivered asynchronously.
@@ -98,6 +102,7 @@ pub struct WordApp {
     pub services: Services,
     pub canvas: canvas::CanvasState,
     pub dialog: Option<dialogs::Dialog>,
+    pub share: share::ShareState,
     pub status_msg: Option<(String, f64)>,
     pub previews: previews::Previews,
     /// macOS: the window has no title bar; leave room for the traffic lights.
@@ -127,6 +132,7 @@ impl WordApp {
             services,
             canvas: canvas::CanvasState::default(),
             dialog: None,
+            share: share::ShareState::default(),
             status_msg: None,
             previews: previews::Previews::default(),
             integrated_titlebar: false,
@@ -289,6 +295,10 @@ impl WordApp {
                 let lang = i18n::Lang::from_pref(&self.ui.language);
                 json!({"language": self.ui.language, "effective": lang.code(), "available": i18n::Lang::all().map(|l| json!({"code": l.code(), "name": l.name()})).collect::<Vec<_>>()})
             }
+            "ui.share" => {
+                self.share.open = p.get("value").and_then(Value::as_bool).unwrap_or(!self.share.open);
+                json!({"share": self.share.open, "active": self.session.collab_active()})
+            }
             "ui.openFileDialog" => {
                 self.open_dialog();
                 json!({})
@@ -449,6 +459,7 @@ impl WordApp {
             });
         }
         dialogs::show(self, &ctx);
+        share::show(self, &ctx);
         keys::global_shortcuts(self, &ctx);
         if let Some(url) = self.canvas.open_url.take() {
             ctx.open_url(egui::OpenUrl::new_tab(url));

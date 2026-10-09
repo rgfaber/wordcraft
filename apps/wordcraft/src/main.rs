@@ -116,6 +116,9 @@ fn services() -> Services {
             d.pick_file().map(|p| p.to_string_lossy().to_string())
         })),
         pick_save: Some(Box::new(|name: &str| rfd::FileDialog::new().set_file_name(name).save_file().map(|p| p.to_string_lossy().to_string()))),
+        join_invite: Some(Box::new(|session: &mut wordcraft_engine::Session, invite: &str, name: &str| {
+            collab_setup::join_from_invite(session, invite, name)
+        })),
         ..Default::default()
     }
 }

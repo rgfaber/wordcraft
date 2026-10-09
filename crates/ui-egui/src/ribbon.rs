@@ -63,8 +63,8 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                         egui::Color32::WHITE,
                     );
                     ui.painter().text(pos2(r.min.x + 26.0, r.center().y), Align2::LEFT_CENTER, share, medium(12.0), egui::Color32::WHITE);
-                    if resp.on_hover_text(tl!("Export a copy to share (PDF, Word document)")).clicked() {
-                        let _ = app.run("ui.backstage", json!({"value": true, "page": "export"}));
+                    if resp.on_hover_text(tl!("Share live (invite people) or export a copy (File › Export)")).clicked() {
+                        let _ = app.run("ui.share", json!({}));
                     }
                     ui.add_space(6.0);
                     let track = app.session.doc.settings.track_changes;

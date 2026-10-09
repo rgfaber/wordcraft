@@ -370,6 +370,12 @@ impl WordApp {
         }
         self.drain_control(ctx);
         self.drain_inbox();
+        // Collaboration: apply peers' edits and cursors, and keep the frame
+        // clock running while a document is shared.
+        self.session.collab_tick();
+        if self.session.collab_active() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
         // AutoSave: write a saved document a couple of seconds after the last change.
         let now = now_ms();
         if self.autosave

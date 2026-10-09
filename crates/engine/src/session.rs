@@ -406,8 +406,8 @@ impl Session {
                     self.doc.ensure_nonempty();
                 }
                 self.clamp_selection();
-                if let Some((pid, index, remove, insert)) = collab_exact {
-                    self.collab_apply_exact(pid, index, remove, insert);
+                if let Some((pid, index, remove, insert, props)) = collab_exact {
+                    self.collab_apply_exact(pid, index, remove, insert, props);
                 } else if let Some((cmd_id, cmd_params, anchor)) = collab_command {
                     self.collab_send_command(cmd_id, cmd_params, anchor);
                 }

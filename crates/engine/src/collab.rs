@@ -32,10 +32,15 @@ pub struct CollabRuntime {
     /// Remote commands that failed to apply (a divergence signal).
     remote_errors: u64,
     seq: u64,
+    /// This process's epoch: a restart keeps its author id but sends a new
+    /// epoch, so peers never confuse its restarted sequence with the old.
+    epoch: u64,
     last_cursor: Option<String>,
     /// This session asked for the document snapshot and is waiting for it.
     awaiting_snapshot: bool,
-    snapshot_requested: bool,
+    /// How many snapshot requests have been sent, and when the last was.
+    snapshot_attempts: u32,
+    last_snapshot_ms: u64,
 }
 
 impl CollabRuntime {
@@ -53,9 +58,11 @@ impl CollabRuntime {
             latency: HashMap::new(),
             remote_errors: 0,
             seq: 0,
+            epoch: now_ms().wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (std::process::id() as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9),
             last_cursor: None,
             awaiting_snapshot: false,
-            snapshot_requested: false,
+            snapshot_attempts: 0,
+            last_snapshot_ms: 0,
         }
     }
 
@@ -76,7 +83,14 @@ impl CollabRuntime {
     /// Queues a message for the peers.
     fn send(&mut self, kind: craft_collab::Kind) {
         self.seq += 1;
-        let msg = craft_collab::Message { doc: self.doc.clone(), author: self.author.clone(), seq: self.seq, sent_at_ms: now_ms(), kind };
+        let msg = craft_collab::Message {
+            doc: self.doc.clone(),
+            author: self.author.clone(),
+            epoch: self.epoch,
+            seq: self.seq,
+            sent_at_ms: now_ms(),
+            kind,
+        };
         let _ = self.transport.send(msg);
     }
 }
@@ -270,12 +284,16 @@ impl Session {
         for msg in msgs {
             self.collab_receive(msg);
         }
-        // A joiner asks for the shared document once.
+        // A joiner asks for the shared document until it hears one back (a
+        // publication can be lost; the request is cheap and idempotent).
+        let now = now_ms();
         if let Some(c) = self.collab.as_mut()
             && c.awaiting_snapshot
-            && !c.snapshot_requested
+            && c.snapshot_attempts < 5
+            && (c.snapshot_attempts == 0 || now.saturating_sub(c.last_snapshot_ms) >= 2_000)
         {
-            c.snapshot_requested = true;
+            c.snapshot_attempts += 1;
+            c.last_snapshot_ms = now;
             c.send(craft_collab::Kind::SnapshotRequest {});
         }
         self.collab_send_cursor();

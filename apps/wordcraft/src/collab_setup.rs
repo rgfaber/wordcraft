@@ -8,12 +8,15 @@
 //!   "realm_key": "<realm key hex>",
 //!   "doc": "demo",
 //!   "name": "Alice",
+//!   "identity": "alice",
 //!   "join": false,
 //!   "profile": "pq_hybrid"
 //! }
 //! ```
-//! `join` makes this instance ask a peer for the document snapshot first (a
-//! joining editor); without it, the instance shares its own document.
+//! `identity` is the storage slug of this person's persistent Craft key (one
+//! key per person per device, shared by every Craft app; secure store, file
+//! fallback headless). `join` makes this instance ask a peer for the document
+//! snapshot first; without it, the instance shares its own document.
 
 use serde::Deserialize;
 use wordcraft_engine::Session;
@@ -25,10 +28,16 @@ struct Config {
     realm_key: String,
     doc: String,
     name: String,
+    #[serde(default = "default_identity")]
+    identity: String,
     #[serde(default)]
     join: bool,
     #[serde(default = "default_profile")]
     profile: String,
+}
+
+fn default_identity() -> String {
+    "default".into()
 }
 
 fn default_profile() -> String {
@@ -43,15 +52,15 @@ pub fn attach(session: &mut Session, path: &str) -> Result<(), String> {
     let (Some(node_hex), Some(port), Some(host)) = (parts.next(), parts.next(), parts.next()) else {
         return Err(format!("{path}: station must be host:port:node_hex"));
     };
+    let identity = macula_craft_collab::Identity::load_or_create(&cfg.profile, &cfg.identity, &cfg.name)?;
     let mesh = macula_craft_collab::MeshConfig {
         host: host.to_string(),
         port: port.parse::<u16>().map_err(|e| format!("{path}: {e}"))?,
         station_node_id: hex32(node_hex).map_err(|e| format!("{path}: station node id: {e}"))?,
         realm_id: hex32(&cfg.realm).map_err(|e| format!("{path}: realm: {e}"))?,
         realm_key: hex_bytes(&cfg.realm_key).map_err(|e| format!("{path}: realm key: {e}"))?,
-        profile: cfg.profile,
     };
-    let transport = macula_craft_collab::MeshTransport::connect(&mesh)?;
+    let transport = macula_craft_collab::MeshTransport::connect(&mesh, &identity)?;
     if cfg.join {
         session.collab_join(&cfg.doc, &cfg.name, Box::new(transport));
     } else {

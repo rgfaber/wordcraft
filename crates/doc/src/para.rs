@@ -35,6 +35,13 @@ pub fn next_rev() -> u64 {
     REV.fetch_add(1, Ordering::Relaxed)
 }
 
+static NEXT_PID: AtomicU64 = AtomicU64::new(1);
+
+/// A fresh collaboration id (process-unique) for a paragraph.
+pub fn next_pid() -> u64 {
+    NEXT_PID.fetch_add(1, Ordering::Relaxed)
+}
+
 /// A formatting run: `len` bytes of text sharing `props`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Run {
@@ -757,6 +764,9 @@ pub struct Paragraph {
     /// Set when this paragraph ends a section (OOXML keeps `w:sectPr` on the last paragraph).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section: Option<Box<SectionProps>>,
+    /// Stable id for collaboration: identifies this paragraph across peers.
+    #[serde(default)]
+    pub pid: u64,
     /// Change counter for caches (not part of equality).
     #[serde(skip, default = "next_rev")]
     pub rev: u64,
@@ -788,6 +798,7 @@ impl Paragraph {
             mark: CharProps::default(),
             objects: Vec::new(),
             section: None,
+            pid: next_pid(),
             rev: next_rev(),
         }
     }
@@ -1152,6 +1163,7 @@ impl Paragraph {
             mark: if self.text.is_empty() && off == 0 { self.mark.clone() } else { carry },
             objects: tail_objs,
             section: self.section.take(),
+            pid: next_pid(),
             rev: next_rev(),
         };
         if tail.text.is_empty() {

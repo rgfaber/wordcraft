@@ -18,6 +18,7 @@ use wordcraft_doc::props::CharProps;
 use wordcraft_doc::{Document, Path, Pos, StoryRef, Table};
 use wordcraft_layout::{DocLayout, LayoutCache, LayoutOptions, NumeralMode, ViewMode};
 
+use crate::collab::CollabRuntime;
 use crate::{CmdError, Registry};
 
 /// A selection: anchor (where it started) and focus (where the caret is).
@@ -346,6 +347,8 @@ pub struct Session {
     /// Page the caret was last on (headers/footers repeat on many pages).
     pub page_hint: usize,
     pub registry: Arc<Registry>,
+    /// Collaboration runtime, when this document is shared with peers.
+    pub collab: Option<CollabRuntime>,
     /// Author name for comments and tracked changes.
     pub author: String,
     /// Initials for comments (File › Options › General); empty = the name's initials.
@@ -560,7 +563,8 @@ impl Session {
         }
     }
 
-    pub fn new(doc: Document) -> Self {
+    pub fn new(mut doc: Document) -> Self {
+        doc.ensure_pids();
         let start = doc.start_of(StoryRef::Body);
         let bib_style = doc_bib_style(&doc);
         Session {
@@ -579,6 +583,7 @@ impl Session {
             goal_x: None,
             page_hint: 0,
             registry: Arc::new(crate::cmd::registry()),
+            collab: None,
             author: "WordCraft User".into(),
             initials: String::new(),
             painter: None,
@@ -890,6 +895,11 @@ impl Session {
     }
     pub fn undo(&mut self) -> bool {
         self.typing_open = false;
+        if self.collab.is_some() {
+            // Per author: undo goes through the collaboration undo stack, so
+            // a peer's concurrent edits are never taken back by it.
+            return self.collab_undo();
+        }
         let Some(u) = self.history.pop().map(Arc::unwrap_or_clone) else { return false };
         let cur = Undo {
             label: u.label.clone(),
@@ -909,6 +919,10 @@ impl Session {
     }
     pub fn redo(&mut self) -> bool {
         self.typing_open = false;
+        if self.collab.is_some() {
+            // The spike supports per-author undo only; redo is not shared.
+            return false;
+        }
         let Some(u) = self.redo.pop().map(Arc::unwrap_or_clone) else { return false };
         let cur = Undo {
             label: u.label.clone(),
@@ -960,6 +974,7 @@ impl Session {
         self.doc = doc;
         self.doc.ensure_nonempty();
         self.password = None;
+        self.doc.ensure_pids();
         self.sel = Selection::caret(self.doc.start_of(StoryRef::Body));
         self.pending = None;
         self.also_selected.clear();
@@ -1117,6 +1132,14 @@ impl Session {
     /// control channel). Mutating commands are undoable; a failed command leaves the document as
     /// it was; a panic inside a command becomes an error.
     pub fn run(&mut self, id: &str, params: &Value) -> Result<Value, CmdError> {
+        self.run_with_origin(id, params, craft_collab::Origin::Local)
+    }
+
+    /// Run a command on behalf of an origin: the local user, or a peer over
+    /// the collaboration seam. Remote commands never enter the local undo
+    /// history, macro recording, Repeat, or the outgoing capture.
+    pub fn run_with_origin(&mut self, id: &str, params: &Value, origin: craft_collab::Origin) -> Result<Value, CmdError> {
+        let local = origin.is_local();
         let join = std::mem::take(&mut self.join_next);
         let reg = self.registry.clone();
         let Some(spec) = reg.get(id) else { return Err(CmdError::Unknown(id.to_string())) };
@@ -1139,10 +1162,13 @@ impl Session {
             }
             p
         };
-        if record && let Some((_, steps)) = self.recording.as_mut() {
+        if record
+            && local
+            && let Some((_, steps)) = self.recording.as_mut()
+        {
             steps.push((id.to_string(), kept()));
         }
-        if spec.mutates && !matches!(id, "edit.undo" | "edit.redo" | "edit.repeat") {
+        if local && spec.mutates && !matches!(id, "edit.undo" | "edit.redo" | "edit.repeat") {
             self.last_command = Some((id.to_string(), kept()));
         }
         // Typing, caret movement and selection outside the equation commands leave the equation.
@@ -1174,7 +1200,7 @@ impl Session {
         }
         if spec.mutates {
             let label = if typing { "Typing" } else { spec.label };
-            if !join || self.history.is_empty() {
+            if local && (!join || self.history.is_empty()) {
                 self.checkpoint(label);
             }
         } else if !spec.id.starts_with("caret.") && !spec.id.starts_with("view.") {
@@ -1188,6 +1214,7 @@ impl Session {
             self.pending_move = None;
         }
         let sel_before = self.sel.clone();
+        let collab_before = (local && spec.mutates && self.collab.is_some()).then(|| self.collab_text_map());
         let run = spec.run;
         let mutates = spec.mutates;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::cmd::column::dispatch(self, id, mutates, run, params)));
@@ -1236,6 +1263,8 @@ impl Session {
                 if !matches!(id, "select.addObject" | "arrange.ungroup") && (spec.mutates || self.sel != sel_before) {
                     self.also_selected.clear();
                 }
+                if let Some(before) = collab_before {
+                    self.collab_after(&before);
             }
             Err(e) => {
                 if let Some((d, s, h, r, t, ev, c)) = before_doc {

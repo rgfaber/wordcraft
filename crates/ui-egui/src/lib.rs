@@ -1367,6 +1367,12 @@ impl WordApp {
         self.clear_stale_change_picture();
         let _ = self.poll_file_dialog();
         self.drain_inbox();
+        // Collaboration: apply peers' edits and cursors, and keep the frame
+        // clock running while a document is shared.
+        self.session.collab_tick();
+        if self.session.collab_active() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
         self.watch_fonts(ctx);
         self.autosave_tick(now_ms());
         if self.autosaves() && self.session.dirty {

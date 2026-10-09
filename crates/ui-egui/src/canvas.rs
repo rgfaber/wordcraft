@@ -1202,6 +1202,18 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         crate::table_pen::paint(app, &painter, &t, &layout, &rects, geo.scale);
         crate::table_resize::paint(app, &painter, &t, &layout, &rects, geo.scale);
         crate::table_mouse::paint(app, &painter, &t, &layout, &rects, geo.scale);
+        // Peers' cursors, when the document is shared.
+        for p in app.session.collab_peers() {
+            let Some(pos) = &p.pos else { continue };
+            let Some(c) = layout.caret_on(pos, app.session.page_hint) else { continue };
+            let Some(pr) = rects.get(c.page) else { continue };
+            let x = pr.min.x + c.x * geo.scale;
+            let y0 = pr.min.y + c.top * geo.scale;
+            let y1 = y0 + c.height * geo.scale;
+            let col = Color32::from_rgb(p.color[0], p.color[1], p.color[2]);
+            painter.line_segment([pos2(x.round() + 0.5, y0), pos2(x.round() + 0.5, y1)], Stroke::new(1.5, col));
+            painter.text(pos2(x + 3.0, y0 - 2.0), egui::Align2::LEFT_BOTTOM, &p.name, regular(c.height * geo.scale * 0.7), col);
+        }
         (resp, rects)
     });
     app.canvas.scroll_offset = out.state.offset;

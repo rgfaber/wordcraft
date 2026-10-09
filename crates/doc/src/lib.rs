@@ -42,7 +42,7 @@ pub mod table;
 pub mod wordart;
 pub mod wrap;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -660,6 +660,92 @@ impl Document {
                 p.blocks.push(para_block(Paragraph::new()));
             }
         }
+    }
+
+    /// Makes every paragraph's collaboration id present and unique (loaded
+    /// documents carry none until this runs).
+    pub fn ensure_pids(&mut self) {
+        fn walk(blocks: &mut Blocks, used: &mut HashSet<u64>) {
+            for b in blocks.iter_mut() {
+                match Arc::make_mut(b) {
+                    Block::Para(p) => {
+                        if p.pid == 0 || !used.insert(p.pid) {
+                            p.pid = para::next_pid();
+                            used.insert(p.pid);
+                        }
+                    }
+                    Block::Table(t) => {
+                        for row in &mut t.rows {
+                            for c in &mut row.cells {
+                                walk(&mut c.blocks, used);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut used = HashSet::new();
+        walk(&mut self.body, &mut used);
+        for p in self.parts.values_mut() {
+            walk(&mut p.blocks, &mut used);
+        }
+    }
+
+    /// The story and path of the paragraph with stable id `pid`.
+    pub fn paragraph_by_pid(&self, pid: u64) -> Option<(StoryRef, Path)> {
+        fn find(blocks: &Blocks, story: StoryRef, prefix: &mut Vec<u32>, pid: u64, out: &mut Option<(StoryRef, Path)>) {
+            for (i, b) in blocks.iter().enumerate() {
+                if out.is_some() {
+                    return;
+                }
+                prefix.push(i as u32);
+                match &**b {
+                    Block::Para(p) => {
+                        if p.pid == pid {
+                            *out = Some((story, Path(prefix.clone())));
+                        }
+                    }
+                    Block::Table(t) => {
+                        for (r, row) in t.rows.iter().enumerate() {
+                            for (c, cell) in row.cells.iter().enumerate() {
+                                prefix.push(r as u32);
+                                prefix.push(c as u32);
+                                find(&cell.blocks, story, prefix, pid, out);
+                                prefix.pop();
+                                prefix.pop();
+                            }
+                        }
+                    }
+                }
+                prefix.pop();
+            }
+        }
+        let mut out = None;
+        find(&self.body, StoryRef::Body, &mut Vec::new(), pid, &mut out);
+        for (id, part) in &self.parts {
+            if out.is_some() {
+                break;
+            }
+            find(&part.blocks, StoryRef::Part(*id), &mut Vec::new(), pid, &mut out);
+        }
+        out
+    }
+
+    /// Replaces the text of the paragraph with stable id `pid` with the
+    /// merged CRDT text, rebuilding its runs as one (keeping the last run's
+    /// formatting). Whether the paragraph was found.
+    pub fn set_paragraph_text_by_pid(&mut self, pid: u64, text: &str) -> bool {
+        let Some((story, path)) = self.paragraph_by_pid(pid) else {
+            return false;
+        };
+        let Ok(p) = self.para_mut(story, &path) else {
+            return false;
+        };
+        let props = p.runs.last().map(|r| r.props.clone()).unwrap_or_else(|| p.mark.clone());
+        p.text = text.to_string();
+        p.runs = if text.is_empty() { Vec::new() } else { vec![Run { len: text.len(), props }] };
+        p.touch();
+        true
     }
 
     pub fn story(&self, s: StoryRef) -> Option<&Blocks> {

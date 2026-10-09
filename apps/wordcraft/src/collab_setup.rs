@@ -79,14 +79,21 @@ pub fn attach(session: &mut Session, path: &str) -> Result<(), String> {
         return Err(format!("{path}: station and realm are required without an invite"));
     }
     let transport = MeshTransport::connect(&mesh_config(&cfg.station, &cfg.realm, &cfg.realm_key)?, &identity)?;
+    // A raw-coordinates config is the document owner's instance: it holds
+    // the access table, mints grants and can invite. `join` only says whether
+    // this instance asks the peers for the document state (a host restart
+    // reopens as a join; a fresh owner does not need to).
     if cfg.join {
         session.collab_join(&cfg.doc, &cfg.name, Box::new(transport));
     } else {
         session.collab_attach(&cfg.doc, &cfg.name, Box::new(transport));
-        session.collab_set_access(identity.verified_access(&cfg.doc));
-        session.collab_set_issuer(Box::new(IdentityIssuer::new(identity.clone())));
-        session.collab_set_auto_approve(cfg.auto_approve);
-        session.collab_set_share_context(&cfg.realm, &cfg.realm_key, &cfg.station, &cfg.profile);
+    }
+    session.collab_set_access(identity.verified_access(&cfg.doc));
+    session.collab_set_issuer(Box::new(IdentityIssuer::new(identity.clone())));
+    session.collab_set_auto_approve(cfg.auto_approve);
+    session.collab_set_share_context(&cfg.realm, &cfg.realm_key, &cfg.station, &cfg.profile);
+    if let Some(path) = grants_path(&cfg.identity, &cfg.doc) {
+        session.collab_set_grants_path(&path);
     }
     Ok(())
 }
@@ -126,6 +133,20 @@ fn mesh_config(seed: &str, realm: &str, realm_key: &str) -> Result<MeshConfig, S
         realm_id: hex32(realm).map_err(|e| format!("realm: {e}"))?,
         realm_key: hex_bytes(realm_key).map_err(|e| format!("realm key: {e}"))?,
     })
+}
+
+/// Where the host's installed grants persist, when a config directory is
+/// known: `craft/collab/<identity>.<doc>.grants.json`.
+fn grants_path(identity: &str, doc: &str) -> Option<String> {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".config")))?;
+    let dir = base.join("craft").join("collab");
+    std::fs::create_dir_all(&dir).ok()?;
+    let safe = |s: &str| s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect::<String>();
+    Some(dir.join(format!("{}.{}.grants.json", safe(identity), safe(doc))).to_string_lossy().to_string())
 }
 
 fn hex_bytes(s: &str) -> Result<Vec<u8>, String> {

@@ -349,6 +349,9 @@ pub struct Session {
     pub registry: Arc<Registry>,
     /// Collaboration runtime, when this document is shared with peers.
     pub collab: Option<CollabRuntime>,
+    /// The realm membership this session's mesh identity holds, when the
+    /// app has read it (`collab.realm`): tier, handle, UCAN expiry.
+    pub realm: Option<Value>,
     /// Author name for comments and tracked changes.
     pub author: String,
     /// Initials for comments (File › Options › General); empty = the name's initials.
@@ -584,6 +587,7 @@ impl Session {
             page_hint: 0,
             registry: Arc::new(crate::cmd::registry()),
             collab: None,
+            realm: None,
             author: "WordCraft User".into(),
             initials: String::new(),
             painter: None,

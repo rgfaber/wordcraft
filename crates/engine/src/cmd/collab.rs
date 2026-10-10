@@ -45,7 +45,15 @@ fn invite(s: &mut Session, v: &Value) -> CmdResult {
     let seed = p::req_str(v, "seed")?;
     let role = role(v)?;
     let ttl = p::u64(v, "ttlMs").unwrap_or(24 * 60 * 60 * 1_000).min(MAX_TTL_MS);
-    let line = s.collab_mint_invite(realm, realm_key, seed, profile, role, ttl).map_err(CmdError::Failed)?;
+    let realm_members = p::bool(v, "realmMembers").unwrap_or(false);
+    let line = if realm_members {
+        // No open token: members of the host's realm are admitted with the
+        // verifier's role (the host must share with a realm).
+        s.collab_mint_realm_invite(realm, realm_key, seed, profile, ttl)
+    } else {
+        s.collab_mint_invite(realm, realm_key, seed, profile, role, ttl)
+    }
+    .map_err(CmdError::Failed)?;
     Ok(json!({"invite": line}))
 }
 

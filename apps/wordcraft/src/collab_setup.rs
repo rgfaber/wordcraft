@@ -59,6 +59,14 @@ struct Config {
     /// The realm name for membership (sign-in) — `io.macula` by default.
     #[serde(default = "default_realm_name")]
     realm_name: String,
+    /// Share this document with a realm's members: any member presenting a
+    /// live membership UCAN is admitted (with `share_role`).
+    #[serde(default)]
+    share_realm: Option<String>,
+    /// The role realm members are admitted with: "viewer" (default) or
+    /// "editor".
+    #[serde(default)]
+    share_role: Option<String>,
 }
 
 fn default_identity() -> String {
@@ -270,6 +278,17 @@ pub fn attach(session: &mut Session, path: &str) -> Result<(), String> {
     session.collab_set_access(identity.verified_access(&cfg.doc));
     session.collab_set_issuer(Box::new(IdentityIssuer::new(identity.clone())));
     session.collab_set_auto_approve(cfg.auto_approve);
+    if let Some(realm) = cfg.share_realm.as_deref() {
+        if cfg.realm_key.is_empty() {
+            return Err(format!("{path}: sharing with {realm} needs the realm's pinned key (realm_key)"));
+        }
+        let role = match cfg.share_role.as_deref() {
+            Some("editor") => craft_collab::Role::Editor,
+            None | Some("viewer") => craft_collab::Role::Viewer,
+            Some(other) => return Err(format!("{path}: unknown share_role `{other}` (viewer or editor)")),
+        };
+        session.collab_set_member_verifier(Box::new(macula_craft_collab::RealmMemberVerifier::new(realm, hex_bytes(&cfg.realm_key)?, role)));
+    }
     session.collab_set_share_context(&cfg.realm, &cfg.realm_key, &cfg.station, &cfg.profile);
     if let Some(path) = grants_path(&cfg.identity, &cfg.doc) {
         session.collab_set_grants_path(&path);
@@ -292,6 +311,13 @@ fn join_line(session: &mut Session, identity: &Identity, name: &str, line: &str)
     let invite = craft_collab::Invite::decode(line.trim())?;
     // The joiner verifies who invited it before connecting anywhere.
     macula_craft_collab::verify_invite(&invite)?;
+    // A realm invite carries no token: present this device's membership UCAN
+    // instead, when it holds one for the realm.
+    let membership = if invite.member_role.is_some() {
+        macula_craft_collab::realm::load_credential(identity.node_id(), &default_realm_name()).and_then(|cred| cred.ucan)
+    } else {
+        None
+    };
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     if !invite.is_live(now) {
         return Err("this invite has expired".into());
@@ -299,7 +325,7 @@ fn join_line(session: &mut Session, identity: &Identity, name: &str, line: &str)
     let transport = MeshTransport::connect(&mesh_config(&invite.seed, &invite.realm, &invite.realm_key)?, identity)?;
     // Joining replaces the collaboration runtime, so the access table is
     // installed after it (installing first would be wiped).
-    session.collab_join_via_invite(&invite.doc, name, Box::new(transport), invite.token);
+    session.collab_join_requesting(&invite.doc, name, Box::new(transport), invite.token.clone(), membership);
     session.collab_set_access(macula_craft_collab::verified_access_from(&invite.doc, &invite.host_key, &invite.profile)?);
     Ok(())
 }

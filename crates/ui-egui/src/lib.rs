@@ -460,6 +460,12 @@ impl WordApp {
             self.applied_dark = Some(dark);
         }
         self.drain_control(ctx);
+        // An idle window still answers the control channel promptly: without
+        // a heartbeat a request waits for the next input event (seen live as
+        // tens of seconds for ui.realmRefresh on an untouched instance).
+        if self.control_rx.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
         self.drain_inbox();
         // Collaboration: apply peers' edits and cursors, and keep the frame
         // clock running while a document is shared.

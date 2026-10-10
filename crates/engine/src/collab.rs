@@ -56,6 +56,11 @@ pub struct CollabRuntime {
     issuer: Option<Box<dyn craft_collab::GrantIssuer>>,
     /// A joiner's open token: presented until a grant arrives.
     token: Option<craft_collab::SignedGrant>,
+    /// A joiner's realm membership UCAN, when it joins by membership.
+    membership: Option<String>,
+    /// The host's realm-member verifier: when set, the document is shared
+    /// with that realm and a live membership admits.
+    member_verifier: Option<Box<dyn craft_collab::MembershipVerifier>>,
     /// This joiner is waiting for its grant.
     awaiting_grant: bool,
     grant_attempts: u32,
@@ -101,6 +106,8 @@ impl CollabRuntime {
             last_snapshot_ms: 0,
             issuer: None,
             token: None,
+            membership: None,
+            member_verifier: None,
             awaiting_grant: false,
             grant_attempts: 0,
             last_grant_ms: 0,
@@ -288,10 +295,38 @@ impl Session {
     /// Joins `doc` through an invite: presents its open token until the host
     /// grants this node, then asks for the snapshot.
     pub fn collab_join_via_invite(&mut self, doc: &str, name: &str, transport: Box<dyn craft_collab::Transport>, token: craft_collab::SignedGrant) {
+        self.collab_join_requesting(doc, name, transport, Some(token), None);
+    }
+
+    /// Joins `doc` presenting either admission: the invite's open token, a
+    /// realm membership UCAN, or both (a realm invite carries no token and
+    /// admits by membership).
+    pub fn collab_join_requesting(
+        &mut self,
+        doc: &str,
+        name: &str,
+        transport: Box<dyn craft_collab::Transport>,
+        token: Option<craft_collab::SignedGrant>,
+        membership: Option<String>,
+    ) {
         let mut runtime = CollabRuntime::new(doc, name, transport);
-        runtime.token = Some(token);
+        runtime.token = token;
+        runtime.membership = membership;
         runtime.awaiting_grant = true;
         self.collab = Some(runtime);
+    }
+
+    /// The host shares this document with a realm: members presenting a live
+    /// membership UCAN of that realm are admitted with the verifier's role.
+    pub fn collab_set_member_verifier(&mut self, verifier: Box<dyn craft_collab::MembershipVerifier>) {
+        if let Some(c) = self.collab.as_mut() {
+            c.member_verifier = Some(verifier);
+        }
+    }
+
+    /// Whether this host shares with a realm.
+    pub fn collab_shares_with_realm(&self) -> bool {
+        matches!(&self.collab, Some(c) if c.member_verifier.is_some())
     }
 
     /// Join requests awaiting the host's yes: (node id, display name).
@@ -346,6 +381,34 @@ impl Session {
         role: craft_collab::Role,
         ttl_ms: u64,
     ) -> Result<String, String> {
+        self.collab_mint_invite_kind(realm, realm_key, seed, profile, role, ttl_ms, false)
+    }
+
+    /// Mints a realm invite: no open token, and members of the host's realm
+    /// are admitted with the verifier's role. The host must share with a
+    /// realm (`collab_set_member_verifier`).
+    pub fn collab_mint_realm_invite(&mut self, realm: &str, realm_key: &str, seed: &str, profile: &str, ttl_ms: u64) -> Result<String, String> {
+        let role = {
+            let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
+            let Some(verifier) = c.member_verifier.as_ref() else {
+                return Err("this document is not shared with a realm".into());
+            };
+            verifier.role()
+        };
+        self.collab_mint_invite_kind(realm, realm_key, seed, profile, role, ttl_ms, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn collab_mint_invite_kind(
+        &mut self,
+        realm: &str,
+        realm_key: &str,
+        seed: &str,
+        profile: &str,
+        role: craft_collab::Role,
+        ttl_ms: u64,
+        realm_members: bool,
+    ) -> Result<String, String> {
         let now = now_ms();
         let (doc, host, host_key, host_name, token) = {
             let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
@@ -365,7 +428,8 @@ impl Session {
             seed: seed.to_string(),
             issued_ms: now,
             expires_ms: now.saturating_add(ttl_ms),
-            token,
+            token: if realm_members { None } else { Some(token) },
+            member_role: if realm_members { Some(role) } else { None },
             signature: Vec::new(),
         };
         // The envelope is signed by the host identity: the joiner can verify
@@ -524,11 +588,12 @@ impl Session {
             && c.awaiting_grant
             && c.grant_attempts < MAX_GRANT_ATTEMPTS
             && (c.grant_attempts == 0 || now.saturating_sub(c.last_grant_ms) >= 2_000)
-            && let Some(token) = c.token.clone()
+            && (c.token.is_some() || c.membership.is_some())
         {
             c.grant_attempts += 1;
             c.last_grant_ms = now;
-            c.send(craft_collab::Kind::JoinRequest { token, name: c.name.clone() });
+            let (token, membership) = (c.token.clone(), c.membership.clone());
+            c.send(craft_collab::Kind::JoinRequest { token, name: c.name.clone(), membership });
         }
 
         // A joiner asks for the shared document until it hears one back (a
@@ -549,8 +614,8 @@ impl Session {
     fn collab_receive(&mut self, msg: craft_collab::Message) {
         // A join request is the door: the host judges it by its token, not
         // by a holder lookup (the joiner holds no grant yet).
-        if let craft_collab::Kind::JoinRequest { token, name } = &msg.kind {
-            self.collab_on_join_request(&msg.author, token, name);
+        if let craft_collab::Kind::JoinRequest { token, name, membership } = &msg.kind {
+            self.collab_on_join_request(&msg.author, token, membership, name);
             return;
         }
         // Access control, on every message: the host and live grant holders
@@ -675,18 +740,39 @@ impl Session {
     /// The host judges a join request by its token: a valid open token gets
     /// a concrete grant (auto-approved when configured, else queued for the
     /// host's yes); an invalid one is refused and counted.
-    fn collab_on_join_request(&mut self, author: &str, token: &craft_collab::SignedGrant, name: &str) {
+    fn collab_on_join_request(&mut self, author: &str, token: &Option<craft_collab::SignedGrant>, membership: &Option<String>, name: &str) {
         let now = now_ms();
-        let role = {
+        let mut admitted: Option<craft_collab::Role> = None;
+        {
             let Some(c) = self.collab.as_mut() else { return };
             if c.issuer.is_none() {
                 return; // not the host: only the host admits
             }
-            let Some(access) = c.access.as_ref() else { return };
-            match access.check_token(token, now) {
-                Ok(checked) => checked.role,
-                Err(_) => return,
+            // The invite's own token, when one was presented.
+            if let Some(token) = token
+                && let Some(access) = c.access.as_ref()
+                && let Ok(checked) = access.check_token(token, now)
+            {
+                admitted = Some(checked.role);
             }
+            // A realm membership: the verifier holds the realm's key and the
+            // host's role mapping; the audience check pins the caller.
+            if admitted.is_none()
+                && let (Some(verifier), Some(ucan)) = (c.member_verifier.as_ref(), membership.as_ref())
+                && verifier.verify_member(ucan, author, now).is_ok()
+            {
+                admitted = Some(verifier.role());
+            }
+        }
+        let Some(role) = admitted else {
+            // A stranger at the door: refused and counted (the old code
+            // returned silently; the count is the honest signal).
+            if let Some(c) = self.collab.as_mut()
+                && c.issuer.is_some()
+            {
+                c.unauthorized += 1;
+            }
+            return;
         };
         let auto = matches!(&self.collab, Some(c) if c.auto_approve);
         if auto {
@@ -775,6 +861,7 @@ impl Session {
             "unauthorized": c.unauthorized,
             "access": c.access.is_some(),
             "awaitingGrant": c.awaiting_grant,
+            "realmShare": c.member_verifier.is_some(),
             "pending": c.pending.iter().map(|(node, (name, _, _))| json!({"node": short(node), "name": name})).collect::<Vec<_>>(),
         })
     }
@@ -1201,6 +1288,26 @@ mod tests {
         }
     }
 
+    /// A stand-in realm-membership verifier: one accepted UCAN string, one
+    /// role. The real verification is the adapter's.
+    struct TestMemberVerifier {
+        accepts: String,
+        role: craft_collab::Role,
+    }
+
+    impl craft_collab::MembershipVerifier for TestMemberVerifier {
+        fn verify_member(&self, ucan: &str, node_id: &str, _now_ms: u64) -> Result<(), String> {
+            if node_id.is_empty() {
+                return Err("no node".into());
+            }
+            if ucan == self.accepts { Ok(()) } else { Err("not a member".into()) }
+        }
+
+        fn role(&self) -> craft_collab::Role {
+            self.role
+        }
+    }
+
     /// A host that mints real grant structures for the join-flow tests; the
     /// crypto itself is exercised in the adapter's tests.
     struct TestIssuer {
@@ -1312,7 +1419,9 @@ mod tests {
         host.collab_tick();
         bob.collab_tick();
 
-        assert_eq!(host.collab_stats()["unauthorized"], 1, "the forged token is refused at the door");
+        // The door's refusal is counted, and the joiner's cursor message is
+        // dropped as an unknown holder on top.
+        assert!(host.collab_stats()["unauthorized"].as_u64().unwrap_or(0) >= 1, "the forged token is refused at the door");
         assert_eq!(bob.collab_stats()["awaitingGrant"], true, "the joiner is still waiting");
         assert_eq!(bob.doc.plain_text(StoryRef::Body), "", "and received no document");
     }
@@ -1390,7 +1499,7 @@ mod tests {
         assert!(!invite.signature.is_empty(), "the envelope is signed by the host");
         assert_eq!(invite.host, "aaaaaaaa");
         assert!(invite.is_live(now_ms()));
-        assert!(invite.token.grant.is_open(), "still an open token");
+        assert!(invite.token.as_ref().expect("token").grant.is_open(), "still an open token");
 
         // And minting without a signing side is refused, never unsigned.
         let mut bare = session();
@@ -1399,6 +1508,65 @@ mod tests {
         bare.collab_attach("demo", "Host", Box::new(tb));
         bare.collab_set_share_context("cc", "", "seed", "pq_pure");
         assert!(bare.collab_invite_from_context(craft_collab::Role::Editor, 60_000).is_err());
+    }
+
+    #[test]
+    fn a_realm_member_joins_through_the_membership_door() {
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb"]);
+        let (ta, tb) = (bus.remove(0), bus.remove(0));
+        let mut host = session();
+        let mut bea = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        host.collab_set_access(host_table());
+        host.collab_set_issuer(Box::new(TestIssuer { host: "aaaaaaaa".into() }));
+        host.collab_set_auto_approve(true);
+        host.collab_set_member_verifier(Box::new(TestMemberVerifier { accepts: "member-good".into(), role: craft_collab::Role::Viewer }));
+        host.run("text.insert", &json!({"text": "shared "})).expect("Host types");
+
+        // The joiner has no invite token at all: a realm membership is its
+        // only admission.
+        bea.collab_join_requesting("demo", "Bea", Box::new(tb), None, Some("member-good".into()));
+        bea.collab_set_access(host_table());
+        bea.collab_tick(); // the membership goes out
+        host.collab_tick(); // the door verifies it
+        bea.collab_tick(); // the grant lands: ask for the snapshot
+        host.collab_tick();
+        bea.collab_tick();
+
+        assert_eq!(bea.collab_stats()["joined"], true, "a realm member lands");
+        assert_eq!(bea.doc.plain_text(StoryRef::Body), "shared ", "and reads the document");
+        assert_eq!(host.collab_holders(), vec!["bbbbbbbb".to_string()]);
+
+        // The mapped role is Viewer: writing is refused on every op.
+        bea.run("text.insert", &json!({"text": "nope "})).expect("Bea types");
+        host.collab_tick();
+        assert_eq!(host.doc.plain_text(StoryRef::Body), "shared ", "a viewer's edit does not land");
+        assert_eq!(host.collab_stats()["unauthorized"], 1);
+    }
+
+    #[test]
+    fn a_bogus_membership_is_refused_at_a_realm_door() {
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb"]);
+        let (ta, tb) = (bus.remove(0), bus.remove(0));
+        let mut host = session();
+        let mut bea = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        host.collab_set_access(host_table());
+        host.collab_set_issuer(Box::new(TestIssuer { host: "aaaaaaaa".into() }));
+        host.collab_set_auto_approve(true);
+        host.collab_set_member_verifier(Box::new(TestMemberVerifier { accepts: "member-good".into(), role: craft_collab::Role::Editor }));
+
+        bea.collab_join_requesting("demo", "Mallory", Box::new(tb), None, Some("member-bad".into()));
+        bea.collab_set_access(host_table());
+        bea.collab_tick();
+        host.collab_tick();
+        bea.collab_tick();
+
+        // The door's refusal is counted, and the joiner's cursor message is
+        // dropped as an unknown holder on top.
+        assert!(host.collab_stats()["unauthorized"].as_u64().unwrap_or(0) >= 1, "the door refused the forged membership");
+        assert_eq!(bea.collab_stats()["awaitingGrant"], true, "and the joiner is still waiting");
+        assert_eq!(bea.doc.plain_text(StoryRef::Body), "", "nothing arrived");
     }
 
     #[test]

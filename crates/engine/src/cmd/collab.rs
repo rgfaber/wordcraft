@@ -20,6 +20,7 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("collab.approve", "Approve a Joiner", "Agents", approve).params(r#"{"node": string}"#).pure(),
         CommandSpec::new("collab.revoke", "Revoke a Holder", "Agents", revoke).params(r#"{"node": string}"#).pure(),
         CommandSpec::new("collab.pending", "Pending Join Requests", "Agents", |s, _| pending(s)).params("{}").pure(),
+        CommandSpec::new("collab.realm", "Realm Membership", "Agents", |s, _| Ok(s.collab_realm())).params("{}").pure(),
     ]
 }
 
@@ -85,5 +86,15 @@ mod tests {
         // A bad role is a params error, not a silent default at the door.
         assert!(s.run("collab.invite", &json!({"realm": "aa", "seed": "s", "role": "owner"})).is_err());
         assert!(s.run("collab.approve", &json!({})).is_err(), "node is required");
+    }
+
+    #[test]
+    fn realm_status_reads_back_what_the_app_stored() {
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        assert_eq!(s.run("collab.realm", &json!({})).expect("realm")["signedIn"], false, "nothing stored yet");
+        s.collab_set_realm(json!({"signedIn": true, "realm": "io.macula", "tier": "device", "ucanExpiresMs": 123}));
+        let r = s.run("collab.realm", &json!({})).expect("realm");
+        assert_eq!(r["tier"], "device");
+        assert_eq!(r["ucanExpiresMs"], 123);
     }
 }

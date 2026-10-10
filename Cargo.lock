@@ -2587,11 +2587,15 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 name = "macula-craft-collab"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "craft-collab",
+ "getrandom 0.2.17",
  "hex",
  "macula-rust",
+ "minreq",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
@@ -2635,7 +2639,7 @@ dependencies = [
  "macula-mldsa",
  "macula-pqc-kx",
  "rcgen",
- "rustls",
+ "rustls 0.23.45",
 ]
 
 [[package]]
@@ -2645,7 +2649,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "151b72a3953fe9bfa0046421046b13b7cd360133d8cd1caf39b468ac25f98456"
 dependencies = [
  "macula-mlkem",
- "rustls",
+ "rustls 0.23.45",
 ]
 
 [[package]]
@@ -2664,7 +2668,7 @@ dependencies = [
  "macula-pqc",
  "quinn",
  "rustix 1.1.5",
- "rustls",
+ "rustls 0.23.45",
  "serde",
  "serde_json",
  "sha2",
@@ -2720,6 +2724,17 @@ checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
 dependencies = [
  "adler2",
  "simd-adler32",
+]
+
+[[package]]
+name = "minreq"
+version = "2.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05015102dad0f7d61691ca347e9d9d9006685a64aefb3d79eecf62665de2153d"
+dependencies = [
+ "rustls 0.21.12",
+ "rustls-webpki 0.101.7",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -3644,7 +3659,7 @@ dependencies = [
  "quinn-proto",
  "quinn-udp",
  "rustc-hash 2.1.3",
- "rustls",
+ "rustls 0.23.45",
  "socket2",
  "thiserror 2.0.21",
  "tokio",
@@ -3666,7 +3681,7 @@ dependencies = [
  "rand_pcg",
  "ring",
  "rustc-hash 2.1.3",
- "rustls",
+ "rustls 0.23.45",
  "rustls-pki-types",
  "rustls-platform-verifier",
  "slab",
@@ -4036,6 +4051,18 @@ dependencies = [
 
 [[package]]
 name = "rustls"
+version = "0.21.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f56a14d1f48b391359b22f731fd4bd7e43c97f3c50eee276f3aa09c94784d3e"
+dependencies = [
+ "log",
+ "ring",
+ "rustls-webpki 0.101.7",
+ "sct",
+]
+
+[[package]]
+name = "rustls"
 version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
@@ -4045,7 +4072,7 @@ dependencies = [
  "once_cell",
  "ring",
  "rustls-pki-types",
- "rustls-webpki",
+ "rustls-webpki 0.103.15",
  "subtle",
  "zeroize",
 ]
@@ -4083,10 +4110,10 @@ dependencies = [
  "jni 0.22.4",
  "log",
  "once_cell",
- "rustls",
+ "rustls 0.23.45",
  "rustls-native-certs",
  "rustls-platform-verifier-android",
- "rustls-webpki",
+ "rustls-webpki 0.103.15",
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
@@ -4098,6 +4125,16 @@ name = "rustls-platform-verifier-android"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eec689c0bc40ff2458a5977b6619cb718087084a18e02a131c599b62d05e1a5f"
+
+[[package]]
+name = "rustls-webpki"
+version = "0.101.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b6275d1ee7a1cd780b64aca7726599a1dbc893b1e64144529e55c3c2f745765"
+dependencies = [
+ "ring",
+ "untrusted 0.9.0",
+]
 
 [[package]]
 name = "rustls-webpki"
@@ -4182,6 +4219,16 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "sct"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da046153aa2352493d6cb7da4b6e5c0c057d8a1d0a9aa8560baffdd945acd414"
+dependencies = [
+ "ring",
+ "untrusted 0.9.0",
+]
 
 [[package]]
 name = "secret-service"
@@ -5328,6 +5375,12 @@ checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
 dependencies = [
  "rustls-pki-types",
 ]
+
+[[package]]
+name = "webpki-roots"
+version = "0.25.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f20c57d8d7db6d3b86154206ae5d8fba62dd39573114de97c2cb0578251f8e1"
 
 [[package]]
 name = "weezl"

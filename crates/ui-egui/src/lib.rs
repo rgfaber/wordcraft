@@ -52,6 +52,13 @@ pub struct Services {
     /// Join through an invite line (app-injected: the app owns the mesh
     /// adapter). `(session, invite line, display name)`.
     pub join_invite: Option<Box<dyn Fn(&mut Session, &str, &str) -> Result<(), String>>>,
+    /// The realm's membership status, read fresh (app-injected).
+    pub realm_refresh: Option<Box<dyn Fn(&mut Session) -> Result<Value, String>>>,
+    /// Start the realm's citizen join session; the answer carries the link.
+    pub sign_in: Option<Box<dyn Fn(&mut Session) -> Result<Value, String>>>,
+    /// Poll the pending join session; on confirmation the credential is
+    /// stored and the fresh membership status returned.
+    pub sign_in_check: Option<Box<dyn Fn(&mut Session) -> Result<Value, String>>>,
 }
 
 /// Files delivered asynchronously.
@@ -294,6 +301,33 @@ impl WordApp {
                 }
                 let lang = i18n::Lang::from_pref(&self.ui.language);
                 json!({"language": self.ui.language, "effective": lang.code(), "available": i18n::Lang::all().map(|l| json!({"code": l.code(), "name": l.name()})).collect::<Vec<_>>()})
+            }
+            "ui.realmRefresh" => {
+                let Some(refresh) = self.services.realm_refresh.as_ref() else {
+                    return Some(Err("this build has no realm support".into()));
+                };
+                match refresh(&mut self.session) {
+                    Ok(status) => json!({"realm": status}),
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            "ui.signIn" => {
+                let Some(sign_in) = self.services.sign_in.as_ref() else {
+                    return Some(Err("this build has no realm support".into()));
+                };
+                match sign_in(&mut self.session) {
+                    Ok(started) => json!({"signIn": started}),
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            "ui.signInCheck" => {
+                let Some(check) = self.services.sign_in_check.as_ref() else {
+                    return Some(Err("this build has no realm support".into()));
+                };
+                match check(&mut self.session) {
+                    Ok(status) => json!({"signIn": status}),
+                    Err(e) => return Some(Err(e)),
+                }
             }
             "ui.share" => {
                 self.share.open = p.get("value").and_then(Value::as_bool).unwrap_or(!self.share.open);

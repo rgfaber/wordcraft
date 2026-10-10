@@ -119,6 +119,9 @@ fn services() -> Services {
         join_invite: Some(Box::new(|session: &mut wordcraft_engine::Session, invite: &str, name: &str| {
             collab_setup::join_from_invite(session, invite, name)
         })),
+        realm_refresh: Some(Box::new(collab_setup::realm_refresh)),
+        sign_in: Some(Box::new(collab_setup::sign_in)),
+        sign_in_check: Some(Box::new(collab_setup::sign_in_check)),
         ..Default::default()
     }
 }

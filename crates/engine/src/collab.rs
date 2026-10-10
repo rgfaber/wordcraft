@@ -250,6 +250,17 @@ impl Session {
         }
     }
 
+    /// Stores the realm membership status the app read for this session's
+    /// identity (`collab.realm` reports it back).
+    pub fn collab_set_realm(&mut self, status: serde_json::Value) {
+        self.realm = Some(status);
+    }
+
+    /// The realm membership status, or a bare not-signed-in answer.
+    pub fn collab_realm(&self) -> serde_json::Value {
+        self.realm.clone().unwrap_or_else(|| serde_json::json!({"signedIn": false}))
+    }
+
     /// Whether this session can mint invites (it is the host and knows its
     /// mesh coordinates).
     pub fn collab_can_invite(&self) -> bool {

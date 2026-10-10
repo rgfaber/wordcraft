@@ -56,6 +56,9 @@ struct Config {
     invite: Option<String>,
     #[serde(default = "default_profile")]
     profile: String,
+    /// The realm name for membership (sign-in) — `io.macula` by default.
+    #[serde(default = "default_realm_name")]
+    realm_name: String,
 }
 
 fn default_identity() -> String {
@@ -66,11 +69,125 @@ fn default_profile() -> String {
     "pq_hybrid".into()
 }
 
+fn default_realm_name() -> String {
+    "io.macula".into()
+}
+
+/// What the realm helpers need from this instance's identity, kept here
+/// because the UI's sign-in hooks run outside the config's own scope.
+struct RealmCtx {
+    identity: Identity,
+    realm_name: String,
+    base: String,
+    pending: Option<String>,
+}
+
+static REALM: std::sync::Mutex<Option<RealmCtx>> = std::sync::Mutex::new(None);
+
+fn with_realm<T>(f: impl FnOnce(&mut RealmCtx) -> Result<T, String>) -> Result<T, String> {
+    let mut guard = REALM.lock().map_err(|e| e.to_string())?;
+    let ctx = guard.as_mut().ok_or_else(|| "this instance has no mesh identity yet".to_string())?;
+    f(ctx)
+}
+
+/// Reads the stored membership into the session and returns it as the
+/// `collab.realm` status object.
+pub fn realm_refresh(session: &mut Session) -> Result<serde_json::Value, String> {
+    let status = with_realm(|ctx| {
+        let cred = macula_craft_collab::realm::load_credential(ctx.identity.node_id(), &ctx.realm_name);
+        Ok(realm_status_json(&ctx.realm_name, cred.as_ref()))
+    })?;
+    session.collab_set_realm(status.clone());
+    Ok(status)
+}
+
+fn realm_status_json(realm_name: &str, cred: Option<&macula_craft_collab::RealmCredential>) -> serde_json::Value {
+    match cred {
+        None => serde_json::json!({"signedIn": false, "realm": realm_name}),
+        Some(cred) => serde_json::json!({
+            "signedIn": true,
+            "realm": cred.realm,
+            "tier": match cred.tier {
+                macula_craft_collab::Tier::Device => "device",
+                macula_craft_collab::Tier::Citizen => "citizen",
+            },
+            "handle": cred.handle(),
+            "orgIdentity": cred.org_identity,
+            "joinedAtMs": cred.joined_at_ms,
+            "ucanExpiresMs": cred.ucan_expires_ms(),
+        }),
+    }
+}
+
+/// Starts the realm's citizen join session: returns the link the person
+/// opens (or scans) and remembers the session for [`sign_in_check`].
+pub fn sign_in(session: &mut Session) -> Result<serde_json::Value, String> {
+    let _ = session;
+    let now = now_ms();
+    with_realm(|ctx| {
+        let created = macula_craft_collab::realm::session::create_session(&ctx.realm_name, &ctx.base, &ctx.identity, now)?;
+        ctx.pending = Some(created.session_id.clone());
+        Ok(serde_json::json!({
+            "portal": ctx.base,
+            "joinUrl": created.join_url,
+            "sessionId": created.session_id,
+            "expiresAt": created.expires_at,
+        }))
+    })
+}
+
+/// Polls the pending join session; on a confirmation stores the credential
+/// (beside the identity keys) and returns the fresh membership status.
+pub fn sign_in_check(session: &mut Session) -> Result<serde_json::Value, String> {
+    let now = now_ms();
+    let status = with_realm(|ctx| {
+        let Some(session_id) = ctx.pending.clone() else {
+            return Ok(serde_json::json!({"status": "none"}));
+        };
+        match macula_craft_collab::realm::session::poll_session(&ctx.base, &session_id)? {
+            macula_craft_collab::realm::SessionStatus::Pending { expires_at } => Ok(serde_json::json!({"status": "pending", "expiresAt": expires_at})),
+            macula_craft_collab::realm::SessionStatus::Expired => {
+                ctx.pending = None;
+                Ok(serde_json::json!({"status": "expired"}))
+            }
+            macula_craft_collab::realm::SessionStatus::Error(e) => Err(e),
+            macula_craft_collab::realm::SessionStatus::Confirmed(confirmed) => {
+                let cred = macula_craft_collab::realm::session::credential_from_confirmed(&ctx.identity, &ctx.realm_name, &ctx.base, confirmed, now);
+                macula_craft_collab::realm::store_credential(&cred)?;
+                ctx.pending = None;
+                Ok(realm_status_json(&ctx.realm_name, Some(&cred)))
+            }
+        }
+    })?;
+    // Only a membership answer replaces the stored status: a pending poll
+    // is about the session, not the membership.
+    if status.get("signedIn").is_some() {
+        session.collab_set_realm(status.clone());
+    }
+    Ok(status)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Reads `path` and attaches `session` to the shared document over the mesh.
 pub fn attach(session: &mut Session, path: &str) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let cfg: Config = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
     let identity = Identity::load_or_create(&cfg.profile, &cfg.identity, &cfg.name)?;
+    if let Ok(mut guard) = REALM.lock() {
+        *guard = Some(RealmCtx {
+            identity: identity.clone(),
+            realm_name: cfg.realm_name.clone(),
+            base: macula_craft_collab::realm::session::realm_base_url(&cfg.realm_name),
+            pending: None,
+        });
+    }
+    let _ = realm_refresh(session);
     if let Some(line) = &cfg.invite {
         join_line(session, &identity, &cfg.name, line)?;
         return Ok(());

@@ -322,6 +322,13 @@ fn main() -> eframe::Result {
             let mut session = Session::new(doc);
             session.system_region = region;
             let mut app = WordApp::new(session, services(file_dialog, &cc.egui_ctx));
+            // The mesh identity is per person/device: load the default one
+            // at startup so the Share window's realm row works before any
+            // document is shared. A --collab run then installs ITS identity
+            // over it (the default must never shadow the configured one).
+            if let Err(e) = collab_setup::ensure_default_identity(&mut app.session) {
+                log::warn!("collab: {e}");
+            }
             if let Some(path) = collab.as_deref()
                 && let Err(e) = collab_setup::attach(&mut app.session, path)
             {
@@ -336,11 +343,6 @@ fn main() -> eframe::Result {
                 app.session.set_document(doc);
             }
             app.watch_desktop_theme(&cc.egui_ctx);
-            // The mesh identity is per person/device: load it at startup so
-            // the Share window's realm row works before any document is
-            // shared (the pref name only names a fresh identity).
-            if let Err(e) = collab_setup::ensure_default_identity(&mut app.session) {
-                log::warn!("collab: {e}");
             app.ui.window = restored;
             app.integrated_titlebar = cfg!(target_os = "macos");
             let mut key_file = None;

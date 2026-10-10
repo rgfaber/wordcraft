@@ -124,6 +124,7 @@ fn sign_in_section(app: &mut WordApp, ui: &mut egui::Ui, ctx: &Context) {
         if let Some(expires) = app.login.link_expires.as_deref() {
             ui.label(egui::RichText::new(format!("The link expires {expires}.")).small());
         }
+        qr_image(ui, &link);
         ui.horizontal(|ui| {
             if ui.button("Copy link").clicked() {
                 ctx.copy_text(link.clone());
@@ -134,7 +135,6 @@ fn sign_in_section(app: &mut WordApp, ui: &mut egui::Ui, ctx: &Context) {
             }
         });
         ui.label(egui::RichText::new("Waiting for the confirmation…").small());
-        ui.label(egui::RichText::new("QR rendering arrives with the scheduled dependency fetch; the link works on any device.").small());
         if now_s() >= app.login.next_poll {
             app.login.next_poll = now_s() + 4.0;
             match check_sign_in(app) {
@@ -152,6 +152,39 @@ fn sign_in_section(app: &mut WordApp, ui: &mut egui::Ui, ctx: &Context) {
             }
         }
         ctx.request_repaint_after(std::time::Duration::from_secs(3));
+    }
+}
+
+/// Draws the link's QR (the shared craft-qr matrix; the drawing is per
+/// app): white ground, black modules, a four-module quiet zone, scaled to
+/// fit the window.
+fn qr_image(ui: &mut egui::Ui, link: &str) {
+    const SIZE: f32 = 208.0;
+    const QUIET: usize = 4;
+    match craft_qr::matrix(link) {
+        Ok(matrix) => {
+            let total = (matrix.width + 2 * QUIET) as f32;
+            let cell = SIZE / total;
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(SIZE, SIZE), egui::Sense::hover());
+            let painter = ui.painter();
+            painter.rect_filled(rect, 2.0, egui::Color32::WHITE);
+            for row in 0..matrix.width {
+                for col in 0..matrix.width {
+                    if matrix.dark(row, col) {
+                        let x = rect.min.x + (col + QUIET) as f32 * cell;
+                        let y = rect.min.y + (row + QUIET) as f32 * cell;
+                        painter.rect_filled(
+                            egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(cell + 0.5, cell + 0.5)),
+                            0.0,
+                            egui::Color32::BLACK,
+                        );
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            ui.label(egui::RichText::new(format!("QR unavailable: {e}")).small());
+        }
     }
 }
 

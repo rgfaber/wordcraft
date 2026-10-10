@@ -90,6 +90,56 @@ fn with_realm<T>(f: impl FnOnce(&mut RealmCtx) -> Result<T, String>) -> Result<T
     f(ctx)
 }
 
+/// Installs the realm context wherever the identity is loaded: the startup
+/// default, `--collab`, or an invite. The identity is per person/device,
+/// not per document, so the Share window's realm row works from a plain
+/// run.
+fn set_realm_ctx(identity: &Identity, realm_name: &str) {
+    set_realm_ctx_with_base(identity, realm_name, &macula_craft_collab::realm::session::realm_base_url(realm_name));
+}
+
+fn set_realm_ctx_with_base(identity: &Identity, realm_name: &str, base: &str) {
+    if let Ok(mut guard) = REALM.lock() {
+        *guard = Some(RealmCtx { identity: identity.clone(), realm_name: realm_name.to_string(), base: base.to_string(), pending: None });
+    }
+}
+
+/// Whether a realm context is installed (the realm hooks can run).
+#[cfg(test)]
+pub fn realm_context_ready() -> bool {
+    REALM.lock().map(|guard| guard.is_some()).unwrap_or(false)
+}
+
+/// The startup default: the person/device identity, loaded (a stored
+/// display name is never rewritten by a pref), with its realm context
+/// installed, so the Share window's realm row works before any document is
+/// shared. `pref_name` (File > Options' user name) names a fresh identity
+/// only.
+pub fn ensure_default_identity(pref_name: &str) -> Result<(), String> {
+    let dir = macula_craft_collab::identity::craft_identity_dir().ok_or_else(|| "no per-user data directory for the identity".to_string())?;
+    let identity = Identity::load_or_create("pq_hybrid", "default", &default_identity_name(&dir, pref_name))?;
+    set_realm_ctx(&identity, &default_realm_name());
+    Ok(())
+}
+
+/// [`ensure_default_identity`] at an explicit directory (tests and
+/// embedders), file backend only.
+#[cfg(test)]
+pub fn ensure_default_identity_at(dir: &std::path::Path, pref_name: &str) -> Result<(), String> {
+    let identity = Identity::load_or_create_at("pq_hybrid", "default", &default_identity_name(dir, pref_name), dir)?;
+    set_realm_ctx(&identity, &default_realm_name());
+    Ok(())
+}
+
+/// The name to load the default identity with: a fresh identity may take
+/// the pref, an existing one is loaded with an empty name because
+/// `load_or_create` rewrites `display_name` whenever a non-empty name is
+/// passed.
+fn default_identity_name(dir: &std::path::Path, pref_name: &str) -> String {
+    let fresh = !dir.join("default.meta").exists();
+    if fresh && !pref_name.trim().is_empty() { pref_name.trim().to_string() } else { String::new() }
+}
+
 /// Reads the stored membership into the session and returns it as the
 /// `collab.realm` status object.
 pub fn realm_refresh(session: &mut Session) -> Result<serde_json::Value, String> {
@@ -145,7 +195,9 @@ pub fn sign_in_check(session: &mut Session) -> Result<serde_json::Value, String>
             return Ok(serde_json::json!({"status": "none"}));
         };
         match macula_craft_collab::realm::session::poll_session(&ctx.base, &session_id)? {
-            macula_craft_collab::realm::SessionStatus::Pending { expires_at } => Ok(serde_json::json!({"status": "pending", "expiresAt": expires_at})),
+            macula_craft_collab::realm::SessionStatus::Pending { expires_at } => {
+                Ok(serde_json::json!({"status": "pending", "expiresAt": expires_at}))
+            }
             macula_craft_collab::realm::SessionStatus::Expired => {
                 ctx.pending = None;
                 Ok(serde_json::json!({"status": "expired"}))
@@ -168,10 +220,7 @@ pub fn sign_in_check(session: &mut Session) -> Result<serde_json::Value, String>
 }
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 /// Reads `path` and attaches `session` to the shared document over the mesh.
@@ -179,14 +228,7 @@ pub fn attach(session: &mut Session, path: &str) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let cfg: Config = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
     let identity = Identity::load_or_create(&cfg.profile, &cfg.identity, &cfg.name)?;
-    if let Ok(mut guard) = REALM.lock() {
-        *guard = Some(RealmCtx {
-            identity: identity.clone(),
-            realm_name: cfg.realm_name.clone(),
-            base: macula_craft_collab::realm::session::realm_base_url(&cfg.realm_name),
-            pending: None,
-        });
-    }
+    set_realm_ctx(&identity, &cfg.realm_name);
     let _ = realm_refresh(session);
     if let Some(line) = &cfg.invite {
         join_line(session, &identity, &cfg.name, line)?;
@@ -220,6 +262,9 @@ pub fn attach(session: &mut Session, path: &str) -> Result<(), String> {
 /// station, plus the host-signed open token this instance presents.
 pub fn join_from_invite(session: &mut Session, invite_line: &str, name: &str) -> Result<(), String> {
     let identity = Identity::load_or_create("pq_hybrid", "default", name)?;
+    // The invite carries the realm id, not its name; io.macula is today's
+    // realm, and the realm row must work after pasting one too.
+    set_realm_ctx(&identity, &default_realm_name());
     join_line(session, &identity, name, invite_line)
 }
 
@@ -227,10 +272,7 @@ fn join_line(session: &mut Session, identity: &Identity, name: &str, line: &str)
     let invite = craft_collab::Invite::decode(line.trim())?;
     // The joiner verifies who invited it before connecting anywhere.
     macula_craft_collab::verify_invite(&invite)?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     if !invite.is_live(now) {
         return Err("this invite has expired".into());
     }
@@ -281,4 +323,46 @@ fn hex32(s: &str) -> Result<[u8; 32], String> {
     let v = hex_bytes(s)?;
     let n = v.len();
     v.try_into().map_err(|_| format!("expected 32 bytes, got {n}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Raf's live repro, fixed and green: a plain run (no `--collab`)
+    /// pressing Share then Sign in. The startup default loads the identity,
+    /// so the realm hooks reach the membership (and, for sign-in, the
+    /// portal) instead of refusing with an identity error.
+    #[test]
+    fn a_plain_run_reaches_the_realm_hooks_without_the_identity_error() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        ensure_default_identity_at(dir.path(), "Test Person").expect("the startup default loads an identity");
+        assert!(realm_context_ready(), "the realm context is installed by the startup default");
+
+        let mut session = Session::new(wordcraft_doc::Document::new());
+        let status = realm_refresh(&mut session).expect("realm_refresh works from a plain run");
+        assert_eq!(status["signedIn"], false, "no membership yet, and no error");
+
+        // sign_in's own guard passes too: against an unreachable portal the
+        // failure is the transport's, never a missing identity.
+        let identity = Identity::load_or_create_at("pq_hybrid", "default", "", dir.path()).expect("identity");
+        set_realm_ctx_with_base(&identity, "io.macula", "http://127.0.0.1:9");
+        let err = sign_in(&mut session).expect_err("an unreachable portal fails the call");
+        assert!(!err.contains("identity"), "not the plain-run identity error: {err}");
+    }
+
+    /// A stored display name survives every startup: the pref names a fresh
+    /// identity only, because `load_or_create` rewrites `display_name`
+    /// whenever a non-empty name is passed on load.
+    #[test]
+    fn a_stored_name_is_never_clobbered_by_the_startup_default() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        ensure_default_identity_at(dir.path(), "First Name").expect("fresh identity takes the pref");
+        let stored = Identity::load_or_create_at("pq_hybrid", "default", "", dir.path()).expect("reload");
+        assert_eq!(stored.name(), "First Name");
+
+        ensure_default_identity_at(dir.path(), "Other Name").expect("a later startup keeps the stored name");
+        let again = Identity::load_or_create_at("pq_hybrid", "default", "", dir.path()).expect("reload");
+        assert_eq!(again.name(), "First Name", "the stored display name survives");
+    }
 }

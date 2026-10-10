@@ -25,9 +25,9 @@ pub mod keys;
 pub mod panes;
 pub mod previews;
 pub mod ribbon;
+pub mod share;
 pub mod theme;
 pub mod widgets;
-pub mod share;
 pub mod window_geometry;
 
 use serde::{Deserialize, Serialize};

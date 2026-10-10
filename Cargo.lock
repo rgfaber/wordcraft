@@ -6022,6 +6022,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "tempfile",
  "winresource",
  "wordcraft-doc",
  "wordcraft-engine",

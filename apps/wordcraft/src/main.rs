@@ -209,6 +209,12 @@ fn main() -> eframe::Result {
                 log::warn!("collab: {e}");
             }
             load_prefs(&mut app);
+            // The mesh identity is per person/device: load it at startup so
+            // the Share window's realm row works before any document is
+            // shared (the pref name only names a fresh identity).
+            if let Err(e) = collab_setup::ensure_default_identity(&app.ui.author) {
+                log::warn!("collab: {e}");
+            }
             app.ui.window = restored;
             app.integrated_titlebar = cfg!(target_os = "macos");
             if let Some(port) = control_port {

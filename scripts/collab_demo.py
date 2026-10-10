@@ -13,7 +13,15 @@ a transcript, screenshots, and the station/link facts.
 Usage:
   python3 scripts/collab_demo.py --bin target/release/wordcraft \
       --realm-key-file /path/to/io_macula_realm_key.hex \
-      [--mode headless|visual] [--stations S1,S2,S3] [--out DIR] [--doc NAME]
+      [--mode headless|visual] [--stations S1,S2,S3] [--out DIR] [--doc NAME] \
+      [--record OUT.mp4]
+
+  --record OUT.mp4 renders a short 16:9 clip of the story from the real
+      windows' own frames (each instance's UI is captured through the
+      control channel, three windows side by side — no desktop capture, no
+      clutter). It shows the group typing converge live, the presence
+      cursors, and ends on the per-author undo beat, then one window drops
+      and rejoins. ffmpeg (libx264) is required.
 
   --mode headless  (default) run through, assert, collect, stop the instances.
   --mode visual    the same run, paced for a person to watch; the windows are
@@ -31,10 +39,12 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 # The stations a demo dials, `host:port:node_hex`, comma-separated (MACULA_STATIONS);
@@ -58,6 +68,8 @@ class Demo:
         self.instances = []
         self.failures = []
         self.started_at = time.time()
+        self.recorder = None
+        self.recording_seconds = 0.0
 
     # ---- evidence ---------------------------------------------------------------------------------
 
@@ -139,10 +151,30 @@ class Demo:
         j2.wait_ready(90)
         self.log("joiners: up, asking for admission")
 
-        names = self.approve_pending(host)
+        names = self.approve_pending(host, expect=2)
         self.check(names == ["Bob", "Carol"], f"host sees the joiners waiting: {names}")
         for joiner, name in ((j1, "Bob"), (j2, "Carol")):
             joiner.wait_until(lambda i: i.stats()["joined"] and "Host start." in i.text(), 60, f"{name} joined and caught up")
+
+        # 3-6. The story, either as the plain evidence run or as the camera
+        # beats of the recorded clip (same checks in both).
+        if self.args.record:
+            self.camera_story(host, j1, j2, invite)
+            for inst in (host, j1, j2):
+                inst.run("ui.share", {})
+            self.settle(host, j1, j2)
+            for inst in (host, j1, j2):
+                inst.screenshot(os.path.join(self.out, "shots", f"{inst.name}.png"))
+            realm = host.request({"method": "ui.realmRefresh", "params": {}})["result"]["realm"]
+            self.facts({
+                "realmTier": realm.get("tier"),
+                "realmHandle": realm.get("handle"),
+                "finalText": host.text(),
+                "converged": not self.failures,
+                "video": self.args.record,
+                "videoSeconds": round(self.recording_seconds, 1),
+            })
+            return
 
         # 3. Concurrent typing in the same paragraph.
         for inst in (host, j1, j2):
@@ -197,13 +229,86 @@ class Demo:
             "converged": not self.failures,
         })
 
-    def approve_pending(self, host):
-        """The host's manual yes for everyone waiting (returns their names)."""
-        items = host.wait_until(
-            lambda i: (p := i.request({"method": "engine.execute", "params": {"command": "collab.pending"}})["result"]["pending"]) or None,
-            60,
-            "join requests pending",
-        )
+    def camera_story(self, host, j1, j2, invite):
+        """The recorded beats: group typing converging live, the per-author
+        undo sell, then a drop and snapshot catch-up. The recorder captures
+        the three real windows throughout; pacing keeps each beat on camera."""
+        frames_dir = os.path.join(self.out, "frames")
+        for inst in (host, j1, j2):
+            inst.run("view.zoom", {"value": 160})
+        self.recorder = Recorder(self, [host, j1, j2], frames_dir)
+        self.recorder.start()
+        started = time.time()
+        self.log("recording: the camera beats")
+
+        # Group typing, chunk by chunk at both the head and the tail of the
+        # paragraph, so the presence cursors move and every window updates.
+        chunks = [
+            (host, "Three people, "),
+            (j1, "one paragraph, "),
+            (j2, "no server. "),
+            (host, "Typed "),
+            (j1, "over "),
+            (j2, "the mesh "),
+            (host, "at the same "),
+            (j1, "time, "),
+            (j2, "converging live. "),
+        ]
+        for inst, text in chunks:
+            # Each author types at their own end of the paragraph, so the
+            # presence cursors and labels travel with the text.
+            end = len(inst.text())
+            inst.run("caret.set", {"pos": {"story": "body", "path": [0], "off": end}})
+            inst.run("text.insert", {"text": text})
+            self.pause(0.9)
+        self.pause(2.2)
+        self.check(self.dumps_equal(host, j1, j2), "recorded run: the group typing converged")
+
+        # The sell: the host's own line appears everywhere, then only that
+        # line is taken back by the host's undo — every window updates.
+        host.run("caret.set", {"pos": {"story": "body", "path": [0], "off": host.text().index("Typed ") if "Typed " in host.text() else 0}})
+        host.run("text.insert", {"text": "THIS LINE IS MINE. "})
+        self.pause(2.6)
+        self.check(all("THIS LINE IS MINE." in i.text() for i in (host, j1, j2)), "recorded run: the host's line is on every window")
+        host.run("edit.undo", {})
+        self.pause(3.0)
+        leftover = all("THIS LINE IS MINE." not in i.text() for i in (host, j1, j2))
+        kept = all("converging live" in i.text() for i in (host, j1, j2))
+        self.check(leftover and kept, "recorded run: the host's undo took back only the host's line, everywhere")
+        self.check(self.dumps_equal(host, j1, j2), "recorded run: still equal after the undo")
+
+        # A window drops, the others keep typing, it rejoins and catches up.
+        j2.stop()
+        self.pause(1.6)
+        host.run("text.insert", {"text": "Carol dropped. "})
+        self.pause(1.4)
+        j1.run("text.insert", {"text": "Still here. "})
+        self.pause(2.4)
+        j2 = self.launch("carol", self.args.ports[2], self.args.stations[2], self.joiner_config("carol", "Carol", invite), {"MACULA_CRAFT_AUTOJOIN_REALM": REALM_NAME})
+        j2.wait_ready(90)
+        self.recorder.watch(j2)
+        self.approve_pending(host)
+        j2.wait_until(lambda i: i.stats()["joined"] and "Still here." in i.text(), 90, "the rejoined window caught up on camera")
+        self.pause(2.6)
+        self.check(self.dumps_equal(host, j1, j2), "recorded run: equal again after the catch-up")
+
+        self.recorder.stop()
+        self.recording_seconds = time.time() - started
+        self.log(f"recording: {self.recorder.frame_count} frames over {self.recording_seconds:.1f}s")
+        video = self.recorder.export(self.args.record, self.recording_seconds)
+        self.log(f"video: {video}")
+
+    def pause(self, seconds):
+        time.sleep(seconds)
+
+    def approve_pending(self, host, expect=1):
+        """The host's manual yes for everyone waiting (returns their names).
+        Waits until `expect` requests are in: cross-station arrivals stagger."""
+        def pending(i):
+            listing = i.request({"method": "engine.execute", "params": {"command": "collab.pending"}})["result"]["pending"]
+            return listing if len(listing) >= expect else None
+
+        items = host.wait_until(pending, 90, f"{expect} join request(s) pending")
         for item in items:
             host.request({"method": "engine.execute", "params": {"command": "collab.approve", "params": {"node": item["node"]}}})
         names = sorted(item["name"] for item in items)
@@ -275,6 +380,142 @@ class Demo:
         return 0 if ok else 1
 
 
+def png_size(path):
+    """A PNG's (width, height) from its IHDR, no image library needed."""
+    with open(path, "rb") as f:
+        head = f.read(24)
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n":
+        raise RuntimeError(f"{path}: not a PNG")
+    return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+
+
+class Recorder:
+    """Captures each instance's own window frame through the control channel
+    (the app's render, not a desktop grab) and composes a 16:9 triptych with
+    labels, then encodes an mp4. One capture thread per window keeps the
+    frame rate honest; a dead instance freezes on its last frame, which is
+    exactly what a dropped window should look like."""
+
+    def __init__(self, demo, instances, frames_dir):
+        self.demo = demo
+        self.instances = list(instances)
+        self.dir = frames_dir
+        os.makedirs(os.path.join(frames_dir, "raw"), exist_ok=True)
+        self.frames = []
+        self.latest = {}
+        self.frame_count = 0
+        self._stop = threading.Event()
+        self._threads = {}
+        self._serials = {}
+
+    def watch(self, inst):
+        """Follow a relaunched instance (the rejoin replaces its process)."""
+        self.instances = [inst if i.name == inst.name else i for i in self.instances]
+        if not any(i.name == inst.name for i in self.instances):
+            self.instances.append(inst)
+
+    def start(self):
+        self._supervisor = threading.Thread(target=self._supervise, daemon=True)
+        self._supervisor.start()
+
+    def _supervise(self):
+        n = 0
+        while not self._stop.is_set():
+            # A capture thread per window, started lazily and re-pointed
+            # when a rejoin replaces the instance. Each thread gets its own
+            # file serial so a relaunched window's captures can never
+            # overwrite (or be overwritten by) the dead process's files.
+            for inst in self.instances:
+                current = self._threads.get(inst.name)
+                if current is None or current[0] is not inst:
+                    # Serials live here, keyed by name: a rejoin is a NEW
+                    # Instance object, and its captures must never share
+                    # filenames with the process it replaced.
+                    serial = self._serials.get(inst.name, 0) + 1
+                    self._serials[inst.name] = serial
+                    t = threading.Thread(target=self._capture, args=(inst, serial), daemon=True)
+                    self._threads[inst.name] = (inst, t)
+                    t.start()
+            if all(self.latest.get(i.name) for i in self.instances):
+                self.frames.append({i.name: self.latest[i.name] for i in self.instances})
+                n += 1
+            time.sleep(0.25)
+
+    def _capture(self, inst, serial):
+        n = 0
+        while not self._stop.is_set():
+            path = os.path.join(self.dir, "raw", f"{inst.name}-{serial:02d}-{n:05d}.png")
+            try:
+                inst.screenshot(path, timeout=10)
+                self.latest[inst.name] = path
+            except Exception:
+                time.sleep(0.2)  # a dead window must not spin hot
+            n += 1
+
+    def stop(self):
+        self._stop.set()
+        if getattr(self, "_supervisor", None):
+            self._supervisor.join(timeout=10)
+        self.frame_count = len(self.frames)
+
+    def export(self, out_path, seconds):
+        if not self.frames:
+            raise RuntimeError("the recorder captured no frames")
+        out_path = os.path.abspath(out_path)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        # Three portrait columns on a dark 16:9 canvas; each window cropped
+        # to its document area so the text is the star. Every column is
+        # fitted into the same box (and padded), robust to any capture size.
+        crop_y = 180
+        box_w, box_h = 620, 744
+        y = 320
+        font = "/usr/share/fonts/TTF/FiraCodeNerdFont-Bold.ttf" if os.path.exists("/usr/share/fonts/TTF/FiraCodeNerdFont-Bold.ttf") else "Sans"
+        cols = {"host": 10, "bob": 650, "carol": 1290}
+        parts = []
+        for idx, name in enumerate(("host", "bob", "carol")):
+            width, height = png_size(self.frames[0][name])
+            crop_h = max(120, min(height - crop_y - 16, 900))
+            parts.append(
+                f"[{idx}:v]crop={width}:{crop_h}:0:{crop_y},"
+                f"scale={box_w}:{box_h}:force_original_aspect_ratio=decrease,"
+                f"pad={box_w}:{box_h}:(ow-iw)/2:(oh-ih)/2:color=0x0a0e14[v{idx}]"
+            )
+        overlays = "[bg][v0]overlay=10:%d[o0];[o0][v1]overlay=650:%d[o1];[o1][v2]overlay=1290:%d[o2]" % (y, y, y)
+        # The labels belong on the dark canvas, after the windows are placed.
+        labels = (
+            f";[o2]drawtext=fontfile={font}:text='Host':fontcolor=white:fontsize=44:x=30:y={y - 60}[l0]"
+            f";[l0]drawtext=fontfile={font}:text='Bob':fontcolor=white:fontsize=44:x=670:y={y - 60}[l1]"
+            f";[l1]drawtext=fontfile={font}:text='Carol':fontcolor=white:fontsize=44:x=1310:y={y - 60}[out]"
+        )
+        filter_complex = ";".join(parts) + ";color=c=0x141a22:s=1920x1080[bg];" + overlays + labels
+        compose_dir = os.path.join(self.dir, "composed")
+        os.makedirs(compose_dir, exist_ok=True)
+        self.demo.log(f"recording: composing {len(self.frames)} frames")
+        for i, frame in enumerate(self.frames):
+            out = os.path.join(compose_dir, f"f{i:05d}.png")
+            cmd = [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", frame["host"], "-i", frame["bob"], "-i", frame["carol"],
+                "-filter_complex", filter_complex, "-map", "[out]", "-frames:v", "1", out,
+            ]
+            subprocess.run(cmd, check=True, capture_output=True)
+        fps = max(1.0, len(self.frames) / max(1.0, seconds))
+        # Hold the final state for a beat (the clip ends on the converged
+        # document, not mid-keystroke), then encode at the capture rate so
+        # playback is real time.
+        hold = max(2, int(fps * 2.4))
+        last = os.path.join(compose_dir, f"f{len(self.frames) - 1:05d}.png")
+        for extra in range(hold):
+            shutil.copyfile(last, os.path.join(compose_dir, f"f{len(self.frames) + extra:05d}.png"))
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-framerate", f"{fps:.3f}",
+             "-i", os.path.join(compose_dir, "f%05d.png"),
+             "-c:v", "libx264", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart", out_path],
+            check=True, capture_output=True,
+        )
+        return out_path
+
+
 class Instance:
     def __init__(self, demo, name, port, station, config):
         self.demo = demo
@@ -284,10 +525,28 @@ class Instance:
         self.config = config
         self.proc = None
         self.next_id = 0
+        # One size everywhere, laid out as a three-up row when the
+        # compositor lets us place windows (Hyprland today): portrait
+        # windows that fit the triptych without scaling the text down.
+        # Three columns that fit the monitor side by side WITHOUT overlap
+        # (the display runs at a ~1.2 scale; these logical sizes become
+        # ~620x850 captures). Windows that overlap, hang off the edge, or
+        # hide each other pause their frame delivery — and a paused window
+        # answers no screenshots.
+        positions = {"host": (8, 70), "bob": (526, 70), "carol": (1044, 70)}
+        self.geometry = (positions.get(name, (400, 300)), 510, 700)
 
     def start(self, env_extra):
         env = dict(os.environ)
         env.update(env_extra)
+        # A fixed window size for every instance (the captures and the clip
+        # need a known geometry; the joinsers' windows otherwise land on
+        # whatever the compositor hands out this time).
+        cfg_home = os.path.join(self.demo.out, "cfg", self.name)
+        os.makedirs(os.path.join(cfg_home, "wordcraft"), exist_ok=True)
+        with open(os.path.join(cfg_home, "wordcraft", "ui.json"), "w") as f:
+            json.dump({"window": {"position": list(self.geometry[0]), "width": self.geometry[1], "height": self.geometry[2], "maximized": False, "monitor": None}}, f)
+        env["XDG_CONFIG_HOME"] = cfg_home
         log_path = self.demo.path("logs", f"{self.name}.log")
         self.log_file = open(log_path, "ab")
         self.proc = subprocess.Popen(
@@ -344,10 +603,34 @@ class Instance:
         while time.time() < deadline:
             try:
                 self.request({"method": "collab.stats", "params": {}}, timeout=5)
+                self.place()
                 return
             except (RuntimeError, OSError):
                 time.sleep(1)
         raise RuntimeError(f"{self.name}: control channel never answered")
+
+    def place(self):
+        """Floats this window and gives it the exact geometry the triptych
+        wants, when the compositor offers a handle (Hyprland's hyprctl);
+        otherwise the window stays wherever it landed and captures still
+        work."""
+        if not shutil.which("hyprctl"):
+            return
+        for _ in range(15):
+            try:
+                out = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=5)
+                clients = json.loads(out.stdout)
+            except Exception:
+                return
+            mine = [c for c in clients if c.get("pid") == self.proc.pid]
+            if mine:
+                addr = "address:" + mine[0]["address"]
+                (_pos, w, h) = self.geometry
+                subprocess.run(["hyprctl", "dispatch", "setfloating", addr], capture_output=True)
+                subprocess.run(["hyprctl", "dispatch", f"resizewindowpixel exact {w} {h},{addr}"], capture_output=True)
+                subprocess.run(["hyprctl", "dispatch", f"movewindowpixel exact {_pos[0]} {_pos[1]},{addr}"], capture_output=True)
+                return
+            time.sleep(0.5)
 
     def wait_until(self, cond, seconds, what):
         deadline = time.time() + seconds
@@ -378,8 +661,8 @@ class Instance:
     def peers(self):
         return {p["name"] for p in self.stats()["peers"]}
 
-    def screenshot(self, path):
-        self.request({"method": "ui.screenshot", "params": {"path": path}}, timeout=60)
+    def screenshot(self, path, timeout=20):
+        self.request({"method": "ui.screenshot", "params": {"path": path}}, timeout=timeout)
 
 
 def main():
@@ -392,6 +675,7 @@ def main():
     parser.add_argument("--doc", default=None)
     parser.add_argument("--realm-key-file", default=None, help="file with the realm's public trust anchor (hex)")
     parser.add_argument("--realm-key-hex", default=None)
+    parser.add_argument("--record", default=None, help="write a short 16:9 mp4 of the story to this path")
     args = parser.parse_args()
 
     args.stations = [s for s in args.stations.split(",") if s]

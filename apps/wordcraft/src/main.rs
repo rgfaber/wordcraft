@@ -212,6 +212,8 @@ fn services(file_dialog: file_dialogs::Hook, ctx: &egui::Context) -> Services {
             collab_setup::join_from_invite(session, invite, name)
         })),
         realm_refresh: Some(Box::new(collab_setup::realm_refresh)),
+        identity_name: Some(Box::new(collab_setup::identity_name)),
+        set_identity_name: Some(Box::new(collab_setup::set_identity_name)),
         sign_in: Some(Box::new(collab_setup::sign_in)),
         sign_in_check: Some(Box::new(collab_setup::sign_in_check)),
         ..Default::default()
@@ -337,7 +339,7 @@ fn main() -> eframe::Result {
             // The mesh identity is per person/device: load it at startup so
             // the Share window's realm row works before any document is
             // shared (the pref name only names a fresh identity).
-            if let Err(e) = collab_setup::ensure_default_identity(&app.ui.author) {
+            if let Err(e) = collab_setup::ensure_default_identity(&mut app.session) {
                 log::warn!("collab: {e}");
             app.ui.window = restored;
             app.integrated_titlebar = cfg!(target_os = "macos");

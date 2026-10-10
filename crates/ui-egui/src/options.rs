@@ -217,6 +217,24 @@ fn general(app: &mut WordApp, ui: &mut Ui) {
         ui.end_row();
     });
     note(ui, "New comments and tracked changes are recorded under this name and these initials.");
+    ui.add_space(8.0);
+    section(ui, "Account");
+    let realm_status = app.session.collab_realm();
+    let realm = realm_status["realm"].as_str().unwrap_or("the realm").to_string();
+    let line = if realm_status["signedIn"].as_bool().unwrap_or(false) {
+        let tier = realm_status["tier"].as_str().unwrap_or("");
+        let handle = realm_status["handle"].as_str().unwrap_or("");
+        let who = if handle.is_empty() { String::new() } else { format!(" — {handle}") };
+        format!("Signed in to {realm} ({tier}){who}")
+    } else {
+        format!("Not signed in to {realm}.")
+    };
+    ui.horizontal(|ui| {
+        ui.label(line);
+        if ui.button(format!("{} {realm}…", tl!("Sign in to"))).clicked() {
+            app.login.open = true;
+        }
+    });
 }
 
 fn display(app: &mut WordApp, ui: &mut Ui) {

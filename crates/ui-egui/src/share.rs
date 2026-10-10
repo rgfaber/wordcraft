@@ -19,10 +19,6 @@ pub struct ShareState {
     pub minted: Option<String>,
     /// The last action's outcome, shown under the buttons.
     pub status: Option<String>,
-    /// A sign-in link waiting for the person's confirmation, and when to
-    /// poll it next.
-    pub realm_link: Option<String>,
-    pub realm_next_poll: f64,
 }
 
 /// A node id shortened for display.
@@ -50,9 +46,9 @@ pub fn show(app: &mut WordApp, ctx: &Context) {
     app.share.open = open;
 }
 
-/// The realm membership row: tier and renewal state, and the sign-in link
-/// when a join session is waiting for the person's confirmation.
-fn realm_section(app: &mut WordApp, ui: &mut egui::Ui, ctx: &Context) {
+/// The realm membership row: tier and renewal state, and the door to the
+/// dedicated Sign in window (signing in happens there, not in place).
+fn realm_section(app: &mut WordApp, ui: &mut egui::Ui, _ctx: &Context) {
     if app.services.realm_refresh.is_none() {
         return;
     }
@@ -67,99 +63,13 @@ fn realm_section(app: &mut WordApp, ui: &mut egui::Ui, ctx: &Context) {
         let who = if handle.is_empty() { String::new() } else { format!(" — {handle}") };
         ui.label(format!("Signed in to {realm} ({tier}){who}"));
         if let Some(exp) = status["ucanExpiresMs"].as_u64() {
-            ui.label(egui::RichText::new(renewal_line(exp)).small());
-        }
-        if ui.button("Refresh").clicked() {
-            app.share.status = Some(match refresh_realm(app) {
-                Ok(()) => "Realm status refreshed.".into(),
-                Err(e) => format!("Refresh failed: {e}"),
-            });
+            ui.label(egui::RichText::new(crate::login::renewal_line(exp)).small());
         }
     } else {
         ui.label(format!("Not signed in to {}.", status["realm"].as_str().unwrap_or("the realm")));
-        if ui.button("Sign in").clicked() {
-            match sign_in(app) {
-                Ok(link) => {
-                    app.share.realm_link = Some(link);
-                    app.share.realm_next_poll = now_s() + 4.0;
-                    app.share.status = Some("Waiting for the confirmation — open the link on any device.".into());
-                }
-                Err(e) => app.share.status = Some(format!("Sign in failed: {e}")),
-            }
-        }
     }
-    if let Some(link) = app.share.realm_link.clone() {
-        ui.add_space(4.0);
-        ui.label("Open this link and confirm with your account:");
-        let mut shown = link.clone();
-        ui.add(egui::TextEdit::singleline(&mut shown).desired_width(f32::INFINITY).interactive(false));
-        ui.horizontal(|ui| {
-            if ui.button("Copy link").clicked() {
-                ctx.copy_text(link.clone());
-                app.share.status = Some("Link copied.".into());
-            }
-            if ui.button("Check now").clicked() {
-                app.share.realm_next_poll = 0.0;
-            }
-        });
-        // Poll quietly while the session waits: the person confirms out of
-        // band and the window catches up.
-        if now_s() >= app.share.realm_next_poll {
-            app.share.realm_next_poll = now_s() + 4.0;
-            match check_sign_in(app) {
-                Ok(Some(done)) => {
-                    app.share.realm_link = None;
-                    app.share.status = Some(done);
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    app.share.realm_link = None;
-                    app.share.status = Some(format!("Sign in failed: {e}"));
-                }
-            }
-        }
-        ctx.request_repaint_after(std::time::Duration::from_secs(3));
-    }
-}
-
-fn renewal_line(expires_ms: u64) -> String {
-    let now = now_s() * 1_000.0;
-    let left_min = if expires_ms > now as u64 { (expires_ms - now as u64) / 60_000 } else { 0 };
-    format!("Membership UCAN valid for {left_min} more minutes.")
-}
-
-fn now_s() -> f64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
-}
-
-fn refresh_realm(app: &mut WordApp) -> Result<(), String> {
-    let Some(refresh) = app.services.realm_refresh.as_ref() else {
-        return Err("this build has no realm support".into());
-    };
-    refresh(&mut app.session).map(|_| ())
-}
-
-fn sign_in(app: &mut WordApp) -> Result<String, String> {
-    let Some(sign_in) = app.services.sign_in.as_ref() else {
-        return Err("this build has no realm support".into());
-    };
-    let started = sign_in(&mut app.session)?;
-    started["joinUrl"].as_str().map(str::to_string).ok_or_else(|| "the realm answered no link".to_string())
-}
-
-/// `Ok(Some(note))` when the session finished (confirmed or expired),
-/// `Ok(None)` while it waits.
-fn check_sign_in(app: &mut WordApp) -> Result<Option<String>, String> {
-    let Some(check) = app.services.sign_in_check.as_ref() else {
-        return Err("this build has no realm support".into());
-    };
-    let status = check(&mut app.session)?;
-    match status["status"].as_str() {
-        Some("pending") | None => Ok(None),
-        Some("confirmed") => Ok(Some("Signed in — the realm membership is stored.".into())),
-        Some("expired") => Ok(Some("The sign-in link expired; start again.".into())),
-        Some("none") => Ok(Some("No sign-in is waiting.".into())),
-        Some(other) => Ok(Some(format!("Sign-in state: {other}"))),
+    if ui.button("Manage sign-in…").clicked() {
+        app.login.open = true;
     }
 }
 

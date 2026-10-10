@@ -205,18 +205,19 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let doc = if sample { wordcraft_engine::sample::sample_document() } else { wordcraft_doc::Document::new() };
             let mut app = WordApp::new(Session::new(doc), services());
+            // The mesh identity is per person/device: load the default one
+            // at startup so the Share window's realm row works before any
+            // document is shared. A --collab run then installs ITS identity
+            // over it (the default must never shadow the configured one).
+            if let Err(e) = collab_setup::ensure_default_identity(&mut app.session) {
+                log::warn!("collab: {e}");
+            }
             if let Some(path) = collab.as_deref()
                 && let Err(e) = collab_setup::attach(&mut app.session, path)
             {
                 log::warn!("collab: {e}");
             }
             load_prefs(&mut app);
-            // The mesh identity is per person/device: load it at startup so
-            // the Share window's realm row works before any document is
-            // shared (the pref name only names a fresh identity).
-            if let Err(e) = collab_setup::ensure_default_identity(&mut app.session) {
-                log::warn!("collab: {e}");
-            }
             app.ui.window = restored;
             app.integrated_titlebar = cfg!(target_os = "macos");
             if let Some(port) = control_port {

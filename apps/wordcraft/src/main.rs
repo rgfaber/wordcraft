@@ -334,6 +334,11 @@ fn main() -> eframe::Result {
                 app.session.set_document(doc);
             }
             app.watch_desktop_theme(&cc.egui_ctx);
+            // The mesh identity is per person/device: load it at startup so
+            // the Share window's realm row works before any document is
+            // shared (the pref name only names a fresh identity).
+            if let Err(e) = collab_setup::ensure_default_identity(&app.ui.author) {
+                log::warn!("collab: {e}");
             app.ui.window = restored;
             app.integrated_titlebar = cfg!(target_os = "macos");
             let mut key_file = None;

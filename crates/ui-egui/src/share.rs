@@ -35,22 +35,18 @@ pub fn show(app: &mut WordApp, ctx: &Context) {
         return;
     }
     let mut open = app.share.open;
-    egui::Window::new("Share")
-        .open(&mut open)
-        .collapsible(false)
-        .default_width(460.0)
-        .show(ctx, |ui| {
-            if app.session.collab_active() {
-                shared_panel(app, ui, ctx);
-            } else {
-                join_form(app, ui);
-            }
-            realm_section(app, ui, ctx);
-            if let Some(msg) = app.share.status.clone() {
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(msg).small());
-            }
-        });
+    egui::Window::new("Share").open(&mut open).collapsible(false).default_width(460.0).show(ctx, |ui| {
+        if app.session.collab_active() {
+            shared_panel(app, ui, ctx);
+        } else {
+            join_form(app, ui);
+        }
+        realm_section(app, ui, ctx);
+        if let Some(msg) = app.share.status.clone() {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(msg).small());
+        }
+    });
     app.share.open = open;
 }
 
@@ -133,10 +129,7 @@ fn renewal_line(expires_ms: u64) -> String {
 }
 
 fn now_s() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
 fn refresh_realm(app: &mut WordApp) -> Result<(), String> {
@@ -172,12 +165,7 @@ fn check_sign_in(app: &mut WordApp) -> Result<Option<String>, String> {
 
 fn join_form(app: &mut WordApp, ui: &mut egui::Ui) {
     ui.label("Not sharing. Paste the invite line the host sent you:");
-    ui.add(
-        egui::TextEdit::multiline(&mut app.share.invite_input)
-            .desired_rows(2)
-            .desired_width(f32::INFINITY)
-            .hint_text("{\"v\":1,\"doc\":…}"),
-    );
+    ui.add(egui::TextEdit::multiline(&mut app.share.invite_input).desired_rows(2).desired_width(f32::INFINITY).hint_text("{\"v\":1,\"doc\":…}"));
     ui.horizontal(|ui| {
         ui.label("Your name:");
         if app.share.name.is_empty() {
@@ -227,7 +215,8 @@ fn shared_panel(app: &mut WordApp, ui: &mut egui::Ui, ctx: &Context) {
                     Err(e) => app.share.status = Some(format!("Could not mint an invite: {e}")),
                 }
             }
-            if app.share.minted.is_some() && ui.button("Copy again").clicked()
+            if app.share.minted.is_some()
+                && ui.button("Copy again").clicked()
                 && let Some(line) = app.share.minted.clone()
             {
                 ctx.copy_text(line);

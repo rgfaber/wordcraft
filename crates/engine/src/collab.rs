@@ -212,11 +212,7 @@ impl Session {
 
     /// The holders of this document (the UI's People list), sorted.
     pub fn collab_holders(&self) -> Vec<String> {
-        self.collab
-            .as_ref()
-            .and_then(|c| c.access.as_ref())
-            .map(|a| a.holder_ids())
-            .unwrap_or_default()
+        self.collab.as_ref().and_then(|c| c.access.as_ref()).map(|a| a.holder_ids()).unwrap_or_default()
     }
 
     /// Names the file where installed grants persist (the app's choice),
@@ -282,13 +278,7 @@ impl Session {
 
     /// Joins `doc` through an invite: presents its open token until the host
     /// grants this node, then asks for the snapshot.
-    pub fn collab_join_via_invite(
-        &mut self,
-        doc: &str,
-        name: &str,
-        transport: Box<dyn craft_collab::Transport>,
-        token: craft_collab::SignedGrant,
-    ) {
+    pub fn collab_join_via_invite(&mut self, doc: &str, name: &str, transport: Box<dyn craft_collab::Transport>, token: craft_collab::SignedGrant) {
         let mut runtime = CollabRuntime::new(doc, name, transport);
         runtime.token = Some(token);
         runtime.awaiting_grant = true;
@@ -297,10 +287,7 @@ impl Session {
 
     /// Join requests awaiting the host's yes: (node id, display name).
     pub fn collab_pending(&self) -> Vec<(String, String)> {
-        self.collab
-            .as_ref()
-            .map(|c| c.pending.iter().map(|(node, (name, _, _))| (node.clone(), name.clone())).collect())
-            .unwrap_or_default()
+        self.collab.as_ref().map(|c| c.pending.iter().map(|(node, (name, _, _))| (node.clone(), name.clone())).collect()).unwrap_or_default()
     }
 
     /// The host approves a pending joiner: mints the grant from its token's
@@ -1192,11 +1179,7 @@ mod tests {
             Ok(signed.grant.clone())
         }
 
-        fn verify_revocation(
-            &self,
-            signed: &craft_collab::SignedRevocation,
-            _now_ms: u64,
-        ) -> Result<craft_collab::Revocation, String> {
+        fn verify_revocation(&self, signed: &craft_collab::SignedRevocation, _now_ms: u64) -> Result<craft_collab::Revocation, String> {
             Ok(signed.revocation.clone())
         }
     }
@@ -1216,14 +1199,7 @@ mod tests {
             vec![7; 32]
         }
 
-        fn issue(
-            &self,
-            doc: &str,
-            holder: &str,
-            role: craft_collab::Role,
-            ttl_ms: u64,
-            now_ms: u64,
-        ) -> Result<craft_collab::SignedGrant, String> {
+        fn issue(&self, doc: &str, holder: &str, role: craft_collab::Role, ttl_ms: u64, now_ms: u64) -> Result<craft_collab::SignedGrant, String> {
             Ok(craft_collab::SignedGrant {
                 grant: craft_collab::Grant {
                     v: craft_collab::GRANT_VERSION,
@@ -1267,8 +1243,7 @@ mod tests {
     }
 
     fn token(host: &str, role: craft_collab::Role) -> craft_collab::SignedGrant {
-        craft_collab::GrantIssuer::open_token(&TestIssuer { host: host.to_string() }, "demo", role, 60_000, now_ms())
-            .expect("token")
+        craft_collab::GrantIssuer::open_token(&TestIssuer { host: host.to_string() }, "demo", role, 60_000, now_ms()).expect("token")
     }
 
     #[test]
@@ -1481,11 +1456,7 @@ mod tests {
             epoch: 1,
             seq: 2,
             sent_at_ms: now_ms(),
-            kind: craft_collab::Kind::Command {
-                id: "text.newParagraph".into(),
-                params: serde_json::to_vec(&json!({})).expect("json"),
-                anchor: None,
-            },
+            kind: craft_collab::Kind::Command { id: "text.newParagraph".into(), params: serde_json::to_vec(&json!({})).expect("json"), anchor: None },
         })
         .expect("send");
         host.collab_tick();
@@ -1537,8 +1508,6 @@ mod tests {
         assert_eq!(cy.collab_stats()["joined"], true, "a holder carries the joiner");
         assert_eq!(cy.doc.plain_text(StoryRef::Body), "carried ");
     }
-
-
 
     fn verified_table(host: &str, holder: &str, role: craft_collab::Role, expires_ms: u64) -> craft_collab::Access {
         let mut a = craft_collab::Access::new("demo", host, std::sync::Arc::new(TestVerifier));

@@ -64,6 +64,11 @@ pub struct CollabRuntime {
     pending: std::collections::BTreeMap<String, (String, u64, craft_collab::Role)>,
     /// Whether the host admits a valid token without asking.
     auto_approve: bool,
+    /// Whether this session holds the document: the origin (attach) does
+    /// from the start; a joiner only once it has loaded a snapshot. An
+    /// approved joiner that has not caught up yet must never answer another
+    /// joiner's snapshot request with its empty document.
+    has_snapshot: bool,
     /// The mesh coordinates this host shares in: (realm, realm key, seed,
     /// signing profile). Opaque here; the invite carries them for a joiner.
     share: Option<(String, String, String, String)>,
@@ -101,6 +106,7 @@ impl CollabRuntime {
             last_grant_ms: 0,
             pending: std::collections::BTreeMap::new(),
             auto_approve: false,
+            has_snapshot: false,
             share: None,
             grants_path: None,
         }
@@ -161,7 +167,10 @@ pub struct PeerView {
 impl Session {
     /// Starts collaborating on `doc` as `name`, over `transport`.
     pub fn collab_attach(&mut self, doc: &str, name: &str, transport: Box<dyn craft_collab::Transport>) {
-        self.collab = Some(CollabRuntime::new(doc, name, transport));
+        let mut runtime = CollabRuntime::new(doc, name, transport);
+        // The origin starts with the document itself.
+        runtime.has_snapshot = true;
+        self.collab = Some(runtime);
     }
 
     /// Joins an already-shared `doc` as `name`: the first tick asks a peer
@@ -608,6 +617,13 @@ impl Session {
                 }
             }
             craft_collab::Kind::SnapshotRequest {} => {
+                // Only a session that holds the document answers: a joiner
+                // still waiting for its own catch-up has nothing to give
+                // (and its empty document would win the race against the
+                // host's real snapshot).
+                if matches!(&self.collab, Some(c) if !c.has_snapshot) {
+                    return;
+                }
                 let data = craft_collab::DocAdapter::snapshot(self);
                 let crdt = self.collab.as_ref().map(|c| c.texts.full_update()).unwrap_or_default();
                 if let Some(c) = self.collab.as_mut() {
@@ -622,6 +638,7 @@ impl Session {
                     if let Some(c) = self.collab.as_mut() {
                         let _ = c.texts.apply_doc_update(&crdt);
                         c.awaiting_snapshot = false;
+                        c.has_snapshot = true;
                     }
                 }
             }
@@ -1462,6 +1479,44 @@ mod tests {
         host.collab_tick();
         assert_eq!(host.collab_stats()["unauthorized"], 1, "the replayable command is not dropped");
         assert_eq!(host.doc.para_paths(StoryRef::Body).len(), 2, "and it applied: the paragraph split");
+    }
+
+    /// The race the automated demo found live: two joiners are approved at
+    /// the same time; the first has not caught up yet when the second asks
+    /// for the document. Its empty document must not win — only the host
+    /// answers, and the second joiner lands on the real text.
+    #[test]
+    fn a_joining_peer_with_nothing_yet_does_not_answer_snapshots() {
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb", "cccccccc"]);
+        let (ta, tb, tc) = (bus.remove(0), bus.remove(0), bus.remove(0));
+        let mut host = session();
+        let mut b = session();
+        let mut c = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        host.collab_set_access(host_table());
+        host.collab_set_issuer(Box::new(TestIssuer { host: "aaaaaaaa".into() }));
+        host.collab_set_auto_approve(true);
+        host.run("text.insert", &json!({"text": "real "})).expect("Host types");
+
+        b.collab_join_via_invite("demo", "Bea", Box::new(tb), token("aaaaaaaa", craft_collab::Role::Editor));
+        b.collab_set_access(host_table());
+        c.collab_join_via_invite("demo", "Cy", Box::new(tc), token("aaaaaaaa", craft_collab::Role::Editor));
+        c.collab_set_access(host_table());
+
+        b.collab_tick(); // both ask for admission
+        c.collab_tick();
+        host.collab_tick(); // the host admits both
+        b.collab_tick(); // b gets its grant and asks for the document
+        c.collab_tick(); // c gets its grant and asks too
+        b.collab_tick(); // b now sees c's request while still waiting itself
+
+        host.collab_tick(); // the host answers c (and b) with the real document
+        c.collab_tick(); // c loads: b must not have answered emptily
+
+        assert_eq!(c.doc.plain_text(StoryRef::Body), "real ", "the empty joiner's snapshot must not win the race");
+        assert_eq!(c.collab_stats()["joined"], true);
+        b.collab_tick();
+        assert_eq!(b.doc.plain_text(StoryRef::Body), "real ");
     }
 
     #[test]

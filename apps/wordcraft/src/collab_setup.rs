@@ -110,34 +110,54 @@ pub fn realm_context_ready() -> bool {
     REALM.lock().map(|guard| guard.is_some()).unwrap_or(false)
 }
 
-/// The startup default: the person/device identity, loaded (a stored
-/// display name is never rewritten by a pref), with its realm context
+/// The startup default: the person/device identity, loaded with an empty
+/// name (a stored display name is never rewritten — a fresh identity is
+/// named in the login window, never guessed here), its realm context
 /// installed, so the Share window's realm row works before any document is
-/// shared. `pref_name` (File > Options' user name) names a fresh identity
-/// only.
-pub fn ensure_default_identity(pref_name: &str) -> Result<(), String> {
+/// shared.
+pub fn ensure_default_identity(session: &mut Session) -> Result<(), String> {
     let dir = macula_craft_collab::identity::craft_identity_dir().ok_or_else(|| "no per-user data directory for the identity".to_string())?;
-    let identity = Identity::load_or_create("pq_hybrid", "default", &default_identity_name(&dir, pref_name))?;
+    let identity = Identity::load_or_create("pq_hybrid", "default", "")?;
+    let _ = dir;
     set_realm_ctx(&identity, &default_realm_name());
+    // Seed the session's realm status too, so the windows and commands show
+    // the realm name (and any stored membership) from the first frame.
+    realm_refresh(session)?;
     Ok(())
 }
 
 /// [`ensure_default_identity`] at an explicit directory (tests and
 /// embedders), file backend only.
 #[cfg(test)]
-pub fn ensure_default_identity_at(dir: &std::path::Path, pref_name: &str) -> Result<(), String> {
-    let identity = Identity::load_or_create_at("pq_hybrid", "default", &default_identity_name(dir, pref_name), dir)?;
+pub fn ensure_default_identity_at(session: &mut Session, dir: &std::path::Path) -> Result<(), String> {
+    let identity = Identity::load_or_create_at("pq_hybrid", "default", "", dir)?;
     set_realm_ctx(&identity, &default_realm_name());
+    realm_refresh(session)?;
     Ok(())
 }
 
-/// The name to load the default identity with: a fresh identity may take
-/// the pref, an existing one is loaded with an empty name because
-/// `load_or_create` rewrites `display_name` whenever a non-empty name is
-/// passed.
-fn default_identity_name(dir: &std::path::Path, pref_name: &str) -> String {
-    let fresh = !dir.join("default.meta").exists();
-    if fresh && !pref_name.trim().is_empty() { pref_name.trim().to_string() } else { String::new() }
+/// The person's display name for this session's identity: what the login
+/// window shows and edits. `default` is true while the name is still the
+/// storage slug (a fresh identity nobody has named yet).
+pub fn identity_name(session: &mut Session) -> Result<serde_json::Value, String> {
+    let _ = session;
+    with_realm(|ctx| {
+        Ok(serde_json::json!({
+            "name": ctx.identity.name(),
+            "slug": ctx.identity.slug(),
+            "default": ctx.identity.name_is_slug(),
+        }))
+    })
+}
+
+/// Sets the person's display name on this identity (persisted beside the
+/// key; later startups keep it).
+pub fn set_identity_name(session: &mut Session, name: &str) -> Result<serde_json::Value, String> {
+    let _ = session;
+    with_realm(|ctx| {
+        ctx.identity.set_display_name(name)?;
+        Ok(serde_json::json!({"name": ctx.identity.name(), "default": ctx.identity.name_is_slug()}))
+    })
 }
 
 /// Reads the stored membership into the session and returns it as the
@@ -336,10 +356,10 @@ mod tests {
     #[test]
     fn a_plain_run_reaches_the_realm_hooks_without_the_identity_error() {
         let dir = tempfile::tempdir().expect("temp dir");
-        ensure_default_identity_at(dir.path(), "Test Person").expect("the startup default loads an identity");
+        let mut session = Session::new(wordcraft_doc::Document::new());
+        ensure_default_identity_at(&mut session, dir.path()).expect("the startup default loads an identity");
         assert!(realm_context_ready(), "the realm context is installed by the startup default");
 
-        let mut session = Session::new(wordcraft_doc::Document::new());
         let status = realm_refresh(&mut session).expect("realm_refresh works from a plain run");
         assert_eq!(status["signedIn"], false, "no membership yet, and no error");
 
@@ -351,18 +371,24 @@ mod tests {
         assert!(!err.contains("identity"), "not the plain-run identity error: {err}");
     }
 
-    /// A stored display name survives every startup: the pref names a fresh
-    /// identity only, because `load_or_create` rewrites `display_name`
-    /// whenever a non-empty name is passed on load.
+    /// The login window is where a person names a fresh identity, and the
+    /// startup path never guesses or clobbers: it loads with an empty name,
+    /// and the chosen name survives every later startup.
     #[test]
     fn a_stored_name_is_never_clobbered_by_the_startup_default() {
         let dir = tempfile::tempdir().expect("temp dir");
-        ensure_default_identity_at(dir.path(), "First Name").expect("fresh identity takes the pref");
-        let stored = Identity::load_or_create_at("pq_hybrid", "default", "", dir.path()).expect("reload");
-        assert_eq!(stored.name(), "First Name");
+        let mut session = Session::new(wordcraft_doc::Document::new());
+        ensure_default_identity_at(&mut session, dir.path()).expect("the startup default loads an identity");
+        let before = identity_name(&mut session).expect("the identity has a name");
+        assert_eq!(before["default"], true, "a fresh identity is unnamed (its name is the slug)");
+        set_identity_name(&mut session, "First Name").expect("the login window names it");
+        assert_eq!(identity_name(&mut session).expect("name")["name"], "First Name");
+        assert!(set_identity_name(&mut session, "   ").is_err(), "an empty name is refused");
 
-        ensure_default_identity_at(dir.path(), "Other Name").expect("a later startup keeps the stored name");
-        let again = Identity::load_or_create_at("pq_hybrid", "default", "", dir.path()).expect("reload");
-        assert_eq!(again.name(), "First Name", "the stored display name survives");
+        let mut session = Session::new(wordcraft_doc::Document::new());
+        ensure_default_identity_at(&mut session, dir.path()).expect("a later startup keeps the stored name");
+        let again = identity_name(&mut session).expect("name");
+        assert_eq!(again["name"], "First Name", "the stored display name survives");
+        assert_eq!(again["default"], false, "and is no longer the slug");
     }
 }

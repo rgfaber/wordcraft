@@ -22,6 +22,7 @@ pub mod dialogs;
 pub mod i18n;
 pub mod icons;
 pub mod keys;
+pub mod login;
 pub mod panes;
 pub mod previews;
 pub mod ribbon;
@@ -59,6 +60,10 @@ pub struct Services {
     /// Poll the pending join session; on confirmation the credential is
     /// stored and the fresh membership status returned.
     pub sign_in_check: Option<Box<dyn Fn(&mut Session) -> Result<Value, String>>>,
+    /// The identity's display name, as the login window shows it.
+    pub identity_name: Option<Box<dyn Fn(&mut Session) -> Result<Value, String>>>,
+    /// Persists a person-chosen display name.
+    pub set_identity_name: Option<Box<dyn Fn(&mut Session, &str) -> Result<Value, String>>>,
 }
 
 /// Files delivered asynchronously.
@@ -110,6 +115,7 @@ pub struct WordApp {
     pub canvas: canvas::CanvasState,
     pub dialog: Option<dialogs::Dialog>,
     pub share: share::ShareState,
+    pub login: login::LoginState,
     pub status_msg: Option<(String, f64)>,
     pub previews: previews::Previews,
     /// macOS: the window has no title bar; leave room for the traffic lights.
@@ -140,6 +146,7 @@ impl WordApp {
             canvas: canvas::CanvasState::default(),
             dialog: None,
             share: share::ShareState::default(),
+            login: login::LoginState::default(),
             status_msg: None,
             previews: previews::Previews::default(),
             integrated_titlebar: false,
@@ -316,7 +323,13 @@ impl WordApp {
                     return Some(Err("this build has no realm support".into()));
                 };
                 match sign_in(&mut self.session) {
-                    Ok(started) => json!({"signIn": started}),
+                    Ok(started) => {
+                        // The window shows the same session the command started.
+                        self.login.link = started["joinUrl"].as_str().map(str::to_string);
+                        self.login.link_expires = started["expiresAt"].as_str().map(str::to_string);
+                        self.login.name_synced = false;
+                        json!({"signIn": started})
+                    }
                     Err(e) => return Some(Err(e)),
                 }
             }
@@ -325,7 +338,41 @@ impl WordApp {
                     return Some(Err("this build has no realm support".into()));
                 };
                 match check(&mut self.session) {
-                    Ok(status) => json!({"signIn": status}),
+                    Ok(status) => {
+                        if status["status"].as_str() != Some("pending") {
+                            self.login.link = None;
+                            self.login.link_expires = None;
+                        }
+                        json!({"signIn": status})
+                    }
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            "ui.login" => {
+                self.login.open = p.get("value").and_then(Value::as_bool).unwrap_or(!self.login.open);
+                if self.login.open {
+                    self.login.name_synced = false;
+                }
+                json!({"login": self.login.open})
+            }
+            "ui.identityName" => {
+                let Some(hook) = self.services.identity_name.as_ref() else {
+                    return Some(Err("this build has no identity support".into()));
+                };
+                match hook(&mut self.session) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            "ui.setIdentityName" => {
+                let Some(name) = s("name") else {
+                    return Some(Err("`name` (string) is required".into()));
+                };
+                let Some(hook) = self.services.set_identity_name.as_ref() else {
+                    return Some(Err("this build has no identity support".into()));
+                };
+                match hook(&mut self.session, name) {
+                    Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 }
             }
@@ -494,6 +541,7 @@ impl WordApp {
         }
         dialogs::show(self, &ctx);
         share::show(self, &ctx);
+        login::show(self, &ctx);
         keys::global_shortcuts(self, &ctx);
         if let Some(url) = self.canvas.open_url.take() {
             ctx.open_url(egui::OpenUrl::new_tab(url));

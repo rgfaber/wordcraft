@@ -70,6 +70,10 @@ class Demo:
         self.started_at = time.time()
         self.recorder = None
         self.recording_seconds = 0.0
+        # Subtitle events as (seconds since the recording started, line):
+        # written beside the video as .srt and burned into the encode.
+        self.subtitles = []
+        self.record_t0 = None
 
     # ---- evidence ---------------------------------------------------------------------------------
 
@@ -158,6 +162,20 @@ class Demo:
 
         # 3-6. The story, either as the plain evidence run or as the camera
         # beats of the recorded clip (same checks in both).
+        if self.args.screen_record:
+            self.camera_story(host, j1, j2, invite, screen=True)
+            for inst in (host, j1, j2):
+                inst.screenshot(os.path.join(self.out, "shots", f"{inst.name}.png"))
+            realm = host.request({"method": "ui.realmRefresh", "params": {}})["result"]["realm"]
+            self.facts({
+                "realmTier": realm.get("tier"),
+                "finalText": host.text(),
+                "converged": not self.failures,
+                "screenVideo": self.args.screen_record,
+                "screenVideoSeconds": round(self.recording_seconds, 1),
+            })
+            return
+
         if self.args.record:
             self.camera_story(host, j1, j2, invite)
             for inst in (host, j1, j2):
@@ -229,17 +247,163 @@ class Demo:
             "converged": not self.failures,
         })
 
-    def camera_story(self, host, j1, j2, invite):
+    def screen_story_setup(self, instances):
+        """Puts the demo windows on their own special workspace, arranges them
+        in a compact grid there, and returns the grid's bounds in Hyprland's
+        (logical) coordinates for cropping the full-output recording in post.
+        Raf's windows never enter the shot: the special workspace shows
+        nothing else."""
+        if not (shutil.which("hyprctl") and shutil.which("wf-recorder")):
+            return None
+        try:
+            active = json.loads(subprocess.run(["hyprctl", "activeworkspace", "-j"], capture_output=True, text=True).stdout)
+            monitors = json.loads(subprocess.run(["hyprctl", "monitors", "-j"], capture_output=True, text=True).stdout)
+        except Exception:
+            return None
+        mon = next((m for m in monitors if m.get("name") == active.get("monitor")), monitors[0])
+        for inst in instances:
+            client = inst.client_addr()
+            if client is None:
+                return None
+            subprocess.run(["hyprctl", "dispatch", f"movetoworkspacesilent special:collabd,address:{client['address']}"], capture_output=True)
+        subprocess.run(["hyprctl", "dispatch", "togglespecialworkspace collabd"], capture_output=True)
+        time.sleep(1.2)
+
+        wins = {}
+        for inst in instances:
+            client = inst.client_addr()
+            if client is None:
+                return None
+            wins[inst.name] = client
+        cell_w = max(int(c["size"][0]) for c in wins.values())
+        cell_h = max(int(c["size"][1]) for c in wins.values())
+        gap = 14
+        cols = 2
+        rows = 2
+        grid_w = cols * cell_w + gap
+        grid_h = rows * cell_h + gap
+        mx, my, mw, mh = int(mon["x"]), int(mon["y"]), int(mon["width"]), int(mon["height"])
+        x0 = mx + max(10, (mw - grid_w) // 2)
+        y0 = my + max(10, (mh - grid_h) // 2)
+        layout = {"host": (0, 0), "bob": (1, 0), "carol": (0, 1)}
+        for name, (col, row) in layout.items():
+            addr = "address:" + wins[name]["address"]
+            x = x0 + col * (cell_w + gap)
+            y = y0 + row * (cell_h + gap)
+            subprocess.run(["hyprctl", "dispatch", f"movewindowpixel exact {x} {y},{addr}"], capture_output=True)
+            subprocess.run(["hyprctl", "dispatch", f"resizewindowpixel exact {cell_w} {cell_h},{addr}"], capture_output=True)
+        time.sleep(0.8)
+        # The final bounds, straight from the compositor.
+        xs, ys, x2, y2 = [], [], [], []
+        for inst in instances:
+            client = inst.client_addr()
+            if client is None:
+                return None
+            x, y = int(client["at"][0]), int(client["at"][1])
+            w, h = int(client["size"][0]), int(client["size"][1])
+            if x < 0 or y < 0:
+                # Hyprland reports special-workspace windows relative to the
+                # monitor; add its origin back.
+                x, y = mx + x, my + y
+            xs.append(x)
+            ys.append(y)
+            x2.append(x + w)
+            y2.append(y + h)
+        bbox = (min(xs), min(ys), max(x2) - min(xs), max(y2) - min(ys))
+        self.log(f"screen recording: grid at {bbox} on {mon['name']} ({mw}x{mh})")
+        return {"monitor": mon["name"], "rect": bbox, "mon": (mx, my, mw, mh)}
+
+    def screen_record(self, setup, seconds):
+        """Records the monitor full-output with wf-recorder (crop in post:
+        region coordinates under a scaled output are a guessing game, the
+        bounding box from hyprctl is not). Returns the raw file path."""
+        raw = os.path.join(self.out, "screen-raw.mp4")
+        proc = subprocess.Popen(
+            ["wf-recorder", "-o", setup["monitor"], "-f", raw, "-c", "libx264"],
+            stdout=self.open_log("wf-recorder.log"),
+            stderr=subprocess.STDOUT,
+        )
+        time.sleep(2.0)
+        if proc.poll() is not None:
+            raise RuntimeError("wf-recorder exited before the recording started (see wf-recorder.log)")
+        return proc, raw
+
+    def open_log(self, name):
+        path = self.path("logs", name)
+        return open(path, "ab")
+
+    def crop_to_16x9(self, raw, out_path, setup):
+        """Crops the recording to the window grid and converts to 16:9
+        1080p. The logical bounding box is mapped through the output's actual
+        pixel scale, measured off the recording itself."""
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+             "-of", "csv=p=0:s=x", raw], capture_output=True, text=True, check=True)
+        cap_w, cap_h = (int(v) for v in probe.stdout.strip().split("x"))
+        mx, _my, mw, _mh = setup["mon"]
+        scale = cap_w / float(mw)
+        bx, by, bw, bh = setup["rect"]
+        crop = (max(0, int((bx - mx) * scale)) - 6, max(0, int(by * scale)) - 6,
+                min(cap_w, int(bw * scale)) + 12, min(cap_h, int(bh * scale)) + 12)
+        crop = (crop[0], crop[1], min(crop[2], cap_w - crop[0]), min(crop[3], cap_h - crop[1]))
+        vf = (f"crop={crop[2]}:{crop[3]}:{crop[0]}:{crop[1]},"
+              f"scale=1920:1080:force_original_aspect_ratio=decrease,"
+              f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=0x141a22")
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", raw, "-vf", vf,
+                        "-c:v", "libx264", "-crf", "20", "-pix_fmt", "yuv420p",
+                        "-movflags", "+faststart", out_path], check=True)
+        return out_path
+
+    def camera_story(self, host, j1, j2, invite, screen=False):
         """The recorded beats: group typing converging live, the per-author
-        undo sell, then a drop and snapshot catch-up. The recorder captures
-        the three real windows throughout; pacing keeps each beat on camera."""
+        undo sell, then a drop and snapshot catch-up — driven steadily so the
+        convergence is on camera."""
+        if screen:
+            setup = self.screen_story_setup([host, j1, j2])
+            if setup is None:
+                raise RuntimeError("screen recording needs hyprctl + wf-recorder on a supported compositor")
+            proc, raw = self.screen_record(setup, 0)
+            started = time.time()
+            try:
+                self.beats(host, j1, j2, invite)
+                for inst in (host, j1, j2):
+                    inst.screenshot(os.path.join(self.out, "shots", f"{inst.name}.png"))
+            finally:
+                proc.send_signal(signal.SIGINT)
+                try:
+                    proc.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                subprocess.run(["hyprctl", "dispatch", "togglespecialworkspace collabd"], capture_output=True)
+                self.recording_seconds = time.time() - started
+            self.log(f"screen recording: {self.recording_seconds:.1f}s captured")
+            self.crop_to_16x9(raw, self.args.screen_record, setup)
+            self.log(f"video: {self.args.screen_record}")
+            return
+
         frames_dir = os.path.join(self.out, "frames")
-        for inst in (host, j1, j2):
-            inst.run("view.zoom", {"value": 160})
         self.recorder = Recorder(self, [host, j1, j2], frames_dir)
         self.recorder.start()
         started = time.time()
+        self.record_t0 = started
         self.log("recording: the camera beats")
+        self.beats(host, j1, j2, invite)
+        self.recorder.stop()
+        self.recording_seconds = time.time() - started
+        self.log(f"recording: {self.recorder.frame_count} frames over {self.recording_seconds:.1f}s")
+        srt = self.write_srt(self.args.record.rsplit(".", 1)[0] + ".srt", self.recording_seconds)
+        video = self.recorder.export(self.args.record, self.recording_seconds, srt)
+        self.log(f"video: {video}")
+        self.log(f"subtitles: {srt} ({len(self.subtitles)} lines)")
+
+    def beats(self, host, j1, j2, invite):
+        """The story on camera: group typing, the undo sell, the drop and
+        catch-up. The checks run in every mode, so a recorded run still
+        proves what it shows."""
+        for inst in (host, j1, j2):
+            inst.run("view.zoom", {"value": 160})
+        self.sub("Three WordCraft windows — one shared document over macula.")
+        self.pause(1.6)
 
         # Group typing, chunk by chunk at both the head and the tail of the
         # paragraph, so the presence cursors move and every window updates.
@@ -254,19 +418,24 @@ class Demo:
             (j1, "time, "),
             (j2, "converging live. "),
         ]
-        for inst, text in chunks:
+        for i, (inst, text) in enumerate(chunks):
             # Each author types at their own end of the paragraph, so the
             # presence cursors and labels travel with the text.
             end = len(inst.text())
             inst.run("caret.set", {"pos": {"story": "body", "path": [0], "off": end}})
             inst.run("text.insert", {"text": text})
             self.pause(0.9)
+            if i == 0:
+                self.sub("Typing in one window appears in the others, live.")
+            if i == 3:
+                self.sub("Cursors and names show who is where.")
         self.pause(2.2)
         self.check(self.dumps_equal(host, j1, j2), "recorded run: the group typing converged")
 
         # The sell: the host's own line appears everywhere, then only that
         # line is taken back by the host's undo — every window updates.
         host.run("caret.set", {"pos": {"story": "body", "path": [0], "off": host.text().index("Typed ") if "Typed " in host.text() else 0}})
+        self.sub("Each author’s undo takes back only their own text.")
         host.run("text.insert", {"text": "THIS LINE IS MINE. "})
         self.pause(2.6)
         self.check(all("THIS LINE IS MINE." in i.text() for i in (host, j1, j2)), "recorded run: the host's line is on every window")
@@ -279,6 +448,7 @@ class Demo:
 
         # A window drops, the others keep typing, it rejoins and catches up.
         j2.stop()
+        self.sub("One drops out mid-edit…")
         self.pause(1.6)
         host.run("text.insert", {"text": "Carol dropped. "})
         self.pause(1.4)
@@ -286,17 +456,38 @@ class Demo:
         self.pause(2.4)
         j2 = self.launch("carol", self.args.ports[2], self.args.stations[2], self.joiner_config("carol", "Carol", invite), {"MACULA_CRAFT_AUTOJOIN_REALM": REALM_NAME})
         j2.wait_ready(90)
-        self.recorder.watch(j2)
+        if self.recorder:
+            self.recorder.watch(j2)
         self.approve_pending(host)
         j2.wait_until(lambda i: i.stats()["joined"] and "Still here." in i.text(), 90, "the rejoined window caught up on camera")
         self.pause(2.6)
         self.check(self.dumps_equal(host, j1, j2), "recorded run: equal again after the catch-up")
+        self.sub("…rejoins, and catches up.")
+        self.pause(2.0)
 
-        self.recorder.stop()
-        self.recording_seconds = time.time() - started
-        self.log(f"recording: {self.recorder.frame_count} frames over {self.recording_seconds:.1f}s")
-        video = self.recorder.export(self.args.record, self.recording_seconds)
-        self.log(f"video: {video}")
+    def sub(self, text):
+        """Records one subtitle line at this moment of the recording."""
+        if self.record_t0 is not None:
+            self.subtitles.append((round(time.time() - self.record_t0, 2), text))
+
+    def write_srt(self, path, seconds):
+        """The subtitle track, standard SRT, from the recorded beats."""
+        lines = []
+        for i, (start, text) in enumerate(self.subtitles):
+            # Never overlaps the next line; the last one covers the closing
+            # hold the encoder adds.
+            end = min(self.subtitles[i + 1][0] - 0.05, start + 6.0) if i + 1 < len(self.subtitles) else seconds + 3.0
+            end = max(end, start + 0.6)
+            def stamp(t):
+                ms = int(round(t * 1000))
+                h, ms = divmod(ms, 3600000)
+                m, ms = divmod(ms, 60000)
+                sec, ms = divmod(ms, 1000)
+                return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
+            lines.append(f"{i + 1}\n{stamp(start)} --> {stamp(end)}\n{text}\n")
+        with open(path, "w") as f:
+            f.write("\n".join(lines))
+        return path
 
     def pause(self, seconds):
         time.sleep(seconds)
@@ -458,7 +649,7 @@ class Recorder:
             self._supervisor.join(timeout=10)
         self.frame_count = len(self.frames)
 
-    def export(self, out_path, seconds):
+    def export(self, out_path, seconds, srt=None):
         if not self.frames:
             raise RuntimeError("the recorder captured no frames")
         out_path = os.path.abspath(out_path)
@@ -507,9 +698,26 @@ class Recorder:
         last = os.path.join(compose_dir, f"f{len(self.frames) - 1:05d}.png")
         for extra in range(hold):
             shutil.copyfile(last, os.path.join(compose_dir, f"f{len(self.frames) + extra:05d}.png"))
+        # Burn the subtitles in at the encode pass: the image sequence gives
+        # each frame a real timestamp, so the track lands on the right beats
+        # (a subtitle filter on the stills themselves would pin t=0).
+        # Burn the lines in with drawtext and explicit time windows: libass
+        # sizes subtitles against its own default canvas, which reads as a
+        # billboard on a 1080p frame (found the hard way).
+        burn = []
+        font = "/usr/share/fonts/TTF/FiraCodeNerdFont-Bold.ttf" if os.path.exists("/usr/share/fonts/TTF/FiraCodeNerdFont-Bold.ttf") else "Sans"
+        chain = []
+        for i, (start, line) in enumerate(self.demo.subtitles):
+            end = self.demo.subtitles[i + 1][0] - 0.05 if i + 1 < len(self.demo.subtitles) else seconds + 3.5
+            chain.append(
+                f"drawtext=fontfile={font}:text='{line}':fontcolor=white:fontsize=40:box=1:boxcolor=black@0.55:boxborderw=16:"
+                f"x=(w-text_w)/2:y=h-96:enable='between(t,{start},{end:.2f})'"
+            )
+        if chain:
+            burn = ["-vf", ",".join(chain)]
         subprocess.run(
             ["ffmpeg", "-y", "-loglevel", "error", "-framerate", f"{fps:.3f}",
-             "-i", os.path.join(compose_dir, "f%05d.png"),
+             "-i", os.path.join(compose_dir, "f%05d.png"), *burn,
              "-c:v", "libx264", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart", out_path],
             check=True, capture_output=True,
         )
@@ -609,6 +817,22 @@ class Instance:
                 time.sleep(1)
         raise RuntimeError(f"{self.name}: control channel never answered")
 
+    def client_addr(self):
+        """The Hyprland address of this instance's window, or None."""
+        if not shutil.which("hyprctl"):
+            return None
+        for _ in range(10):
+            try:
+                out = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=5)
+                clients = json.loads(out.stdout)
+            except Exception:
+                return None
+            mine = [c for c in clients if c.get("pid") == self.proc.pid]
+            if mine:
+                return mine[0]
+            time.sleep(0.4)
+        return None
+
     def place(self):
         """Floats this window and gives it the exact geometry the triptych
         wants, when the compositor offers a handle (Hyprland's hyprctl);
@@ -675,7 +899,8 @@ def main():
     parser.add_argument("--doc", default=None)
     parser.add_argument("--realm-key-file", default=None, help="file with the realm's public trust anchor (hex)")
     parser.add_argument("--realm-key-hex", default=None)
-    parser.add_argument("--record", default=None, help="write a short 16:9 mp4 of the story to this path")
+    parser.add_argument("--record", default=None, help="write a short 16:9 mp4 of the story (window-frame triptych) to this path")
+    parser.add_argument("--screen-record", default=None, help="record the demo windows with wf-recorder (a true screen capture) to this mp4")
     args = parser.parse_args()
 
     args.stations = [s for s in args.stations.split(",") if s]

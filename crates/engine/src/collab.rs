@@ -279,6 +279,25 @@ impl Session {
         self.collab.as_ref().is_some_and(|c| c.issuer.is_some() && c.share.is_some())
     }
 
+    /// Mints an invite for one person from the remembered share context:
+    /// the token names their node id, and only that node is admitted.
+    pub fn collab_invite_for_from_context(
+        &mut self,
+        holder: &str,
+        invitee_name: &str,
+        role: craft_collab::Role,
+        ttl_ms: u64,
+    ) -> Result<String, String> {
+        let (realm, realm_key, seed, profile) = {
+            let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
+            let Some((realm, realm_key, seed, profile)) = c.share.as_ref() else {
+                return Err("this session does not know its mesh coordinates".into());
+            };
+            (realm.clone(), realm_key.clone(), seed.clone(), profile.clone())
+        };
+        self.collab_mint_invite_for(&realm, &realm_key, &seed, &profile, holder, invitee_name, role, ttl_ms)
+    }
+
     /// Mints an invite from the remembered share context (the UI's Copy
     /// invite): `role` and `ttl_ms` as in `collab_mint_invite`.
     pub fn collab_invite_from_context(&mut self, role: craft_collab::Role, ttl_ms: u64) -> Result<String, String> {
@@ -381,7 +400,7 @@ impl Session {
         role: craft_collab::Role,
         ttl_ms: u64,
     ) -> Result<String, String> {
-        self.collab_mint_invite_kind(realm, realm_key, seed, profile, role, ttl_ms, false)
+        self.collab_mint_invite_kind(realm, realm_key, seed, profile, role, ttl_ms, false, None)
     }
 
     /// Mints a realm invite: no open token, and members of the host's realm
@@ -395,7 +414,29 @@ impl Session {
             };
             verifier.role()
         };
-        self.collab_mint_invite_kind(realm, realm_key, seed, profile, role, ttl_ms, true)
+        self.collab_mint_invite_kind(realm, realm_key, seed, profile, role, ttl_ms, true, None)
+    }
+
+    /// Mints an invite for one person: the token's holder is that person's
+    /// node id, so only that node is admitted at the door. The caller knows
+    /// the node id (from contacts or the person's own message).
+    #[allow(clippy::too_many_arguments)]
+    pub fn collab_mint_invite_for(
+        &mut self,
+        realm: &str,
+        realm_key: &str,
+        seed: &str,
+        profile: &str,
+        holder: &str,
+        invitee_name: &str,
+        role: craft_collab::Role,
+        ttl_ms: u64,
+    ) -> Result<String, String> {
+        let holder = holder.trim().to_ascii_lowercase();
+        if holder.len() != 64 || !holder.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err("an invitee node id is 64 hex characters".into());
+        }
+        self.collab_mint_invite_kind(realm, realm_key, seed, profile, role, ttl_ms, false, Some((&holder, invitee_name)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -408,12 +449,17 @@ impl Session {
         role: craft_collab::Role,
         ttl_ms: u64,
         realm_members: bool,
+        holder: Option<(&str, &str)>,
     ) -> Result<String, String> {
         let now = now_ms();
         let (doc, host, host_key, host_name, token) = {
             let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
             let Some(issuer) = c.issuer.as_ref() else { return Err("this session is not the host".into()) };
-            let token = issuer.open_token(&c.doc, role, ttl_ms, now)?;
+            let token = match holder {
+                // An invite for one person: the token is pre-named for them.
+                Some((node, _name)) => issuer.issue(&c.doc, node, role, ttl_ms, now)?,
+                None => issuer.open_token(&c.doc, role, ttl_ms, now)?,
+            };
             (c.doc.clone(), issuer.node_id(), issuer.carried_key(), c.name.clone(), token)
         };
         let mut invite = craft_collab::Invite {
@@ -430,6 +476,8 @@ impl Session {
             expires_ms: now.saturating_add(ttl_ms),
             token: if realm_members { None } else { Some(token) },
             member_role: if realm_members { Some(role) } else { None },
+            invitee: holder.map(|(node, _)| node.to_string()),
+            invitee_name: holder.map(|(_, name)| name.to_string()),
             signature: Vec::new(),
         };
         // The envelope is signed by the host identity: the joiner can verify
@@ -751,7 +799,7 @@ impl Session {
             // The invite's own token, when one was presented.
             if let Some(token) = token
                 && let Some(access) = c.access.as_ref()
-                && let Ok(checked) = access.check_token(token, now)
+                && let Ok(checked) = access.check_token_for(token, author, now)
             {
                 admitted = Some(checked.role);
             }
@@ -1567,6 +1615,57 @@ mod tests {
         assert!(host.collab_stats()["unauthorized"].as_u64().unwrap_or(0) >= 1, "the door refused the forged membership");
         assert_eq!(bea.collab_stats()["awaitingGrant"], true, "and the joiner is still waiting");
         assert_eq!(bea.doc.plain_text(StoryRef::Body), "", "nothing arrived");
+    }
+
+    /// An invite minted for one person admits only that node: the token's
+    /// holder is checked against the message's verified author at the door.
+    #[test]
+    fn an_invite_for_one_person_admits_only_that_node() {
+        // Node ids in the wild are 64 hex characters; the invite's person is
+        // named by exactly the id the transport reports as its author.
+        let bob_id = "bb".repeat(32);
+        let carol_id = "cc".repeat(32);
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", bob_id.as_str(), carol_id.as_str()]);
+        let (ta, tb, tc) = (bus.remove(0), bus.remove(0), bus.remove(0));
+        let mut host = session();
+        let mut bob = session();
+        let mut carol = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        host.collab_set_access(host_table());
+        host.collab_set_issuer(Box::new(TestIssuer { host: "aaaaaaaa".into() }));
+        host.collab_set_auto_approve(true);
+        host.run("text.insert", &json!({"text": "for one "})).expect("Host types");
+
+        let realm = "cc".repeat(32);
+        let line = host
+            .collab_mint_invite_for(&realm, "", "station.example:4433:dd", "pq_pure", &bob_id, "Bob", craft_collab::Role::Editor, 60_000)
+            .expect("mint for Bob");
+        let invite = craft_collab::Invite::decode(&line).expect("decode");
+        assert_eq!(invite.invitee.as_deref(), Some(bob_id.as_str()));
+        assert_eq!(invite.invitee_name.as_deref(), Some("Bob"));
+        let token = invite.token.clone().expect("a pre-named token");
+        assert_eq!(token.grant.holder, bob_id, "the token names its person");
+
+        // Carol presents Bob's invite: the door refuses her.
+        carol.collab_join_via_invite("demo", "Carol", Box::new(tc), token.clone());
+        carol.collab_set_access(host_table());
+        carol.collab_tick();
+        host.collab_tick();
+        carol.collab_tick();
+        assert_eq!(carol.collab_stats()["awaitingGrant"], true, "another node's invite does not admit");
+        assert_eq!(carol.doc.plain_text(StoryRef::Body), "", "and nothing arrived");
+        assert!(host.collab_stats()["unauthorized"].as_u64().unwrap_or(0) >= 1, "the refusal is counted");
+
+        // Bob presents his own invite: admitted with the document.
+        bob.collab_join_via_invite("demo", "Bob", Box::new(tb), token);
+        bob.collab_set_access(host_table());
+        bob.collab_tick();
+        host.collab_tick();
+        bob.collab_tick();
+        host.collab_tick();
+        bob.collab_tick();
+        assert_eq!(bob.collab_stats()["joined"], true, "the named node is admitted");
+        assert_eq!(bob.doc.plain_text(StoryRef::Body), "for one ");
     }
 
     #[test]

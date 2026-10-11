@@ -17,6 +17,9 @@ pub struct ShareState {
     pub name: String,
     /// The last invite this host minted.
     pub minted: Option<String>,
+    /// The invite-a-person form: the person's node id (hex) and name.
+    pub for_node: String,
+    pub for_name: String,
     /// The last action's outcome, shown under the buttons.
     pub status: Option<String>,
 }
@@ -137,6 +140,26 @@ fn shared_panel(app: &mut WordApp, ui: &mut egui::Ui, ctx: &Context) {
             let mut shown = line;
             ui.add(egui::TextEdit::multiline(&mut shown).desired_rows(2).desired_width(f32::INFINITY).interactive(false));
         }
+        ui.add_space(4.0);
+        ui.label("For one person (their node id, from contacts or their own message):");
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut app.share.for_node).desired_width(300.0).hint_text("64 hex characters"));
+            ui.add(egui::TextEdit::singleline(&mut app.share.for_name).desired_width(120.0).hint_text("Name"));
+            let ready = !app.share.for_node.trim().is_empty();
+            ui.add_enabled_ui(ready, |ui| {
+                if ui.button("Mint for them").clicked() {
+                    let (node, name) = (app.share.for_node.clone(), app.share.for_name.clone());
+                    match app.session.collab_invite_for_from_context(&node, &name, craft_collab::Role::Editor, 24 * 60 * 60 * 1_000) {
+                        Ok(line) => {
+                            ctx.copy_text(line.clone());
+                            app.share.minted = Some(line);
+                            app.share.status = Some("Their invite copied to the clipboard.".into());
+                        }
+                        Err(e) => app.share.status = Some(format!("Could not mint their invite: {e}")),
+                    }
+                }
+            });
+        });
     }
 
     let pending = app.session.collab_pending();

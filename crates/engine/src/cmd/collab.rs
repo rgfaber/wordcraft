@@ -15,7 +15,7 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("collab.stats", "Collaboration Status", "Agents", |s, _| stats(s)).params("{}").pure(),
         CommandSpec::new("collab.invite", "Invite to Document", "Agents", invite)
-            .params(r#"{"realm": string, "realmKey": string, "seed": string, "role": "editor"|"viewer", "ttlMs": number}"#)
+            .params(r#"{"realm": string, "realmKey": string, "seed": string, "role": "editor"|"viewer", "ttlMs": number, "forNode"?: hex, "forName"?: string, "realmMembers"?: 1}"#)
             .pure(),
         CommandSpec::new("collab.approve", "Approve a Joiner", "Agents", approve).params(r#"{"node": string}"#).pure(),
         CommandSpec::new("collab.revoke", "Revoke a Holder", "Agents", revoke).params(r#"{"node": string}"#).pure(),
@@ -46,7 +46,13 @@ fn invite(s: &mut Session, v: &Value) -> CmdResult {
     let role = role(v)?;
     let ttl = p::u64(v, "ttlMs").unwrap_or(24 * 60 * 60 * 1_000).min(MAX_TTL_MS);
     let realm_members = p::bool(v, "realmMembers").unwrap_or(false);
-    let line = if realm_members {
+    let for_node = p::str(v, "forNode");
+    let for_name = p::str(v, "forName").unwrap_or("");
+    let line = if let Some(node) = for_node {
+        // An invite for one person: the token names their node id, and only
+        // that node is admitted at the door.
+        s.collab_mint_invite_for(realm, realm_key, seed, profile, node, for_name, role, ttl)
+    } else if realm_members {
         // No open token: members of the host's realm are admitted with the
         // verifier's role (the host must share with a realm).
         s.collab_mint_realm_invite(realm, realm_key, seed, profile, ttl)

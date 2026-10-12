@@ -197,4 +197,44 @@ fn shared_panel(app: &mut WordApp, ui: &mut egui::Ui, ctx: &Context) {
             });
         }
     }
+
+    let contacts = app.session.collab_contacts();
+    if !contacts.is_empty() {
+        ui.add_space(6.0);
+        ui.separator();
+        ui.label("Contacts (people you have met over the mesh):");
+        let mut invite_for: Option<(String, String)> = None;
+        let mut forget: Option<String> = None;
+        for contact in &contacts {
+            let label = if contact.name.is_empty() { short(&contact.node) } else { format!("{} ({})", contact.name, short(&contact.node)) };
+            ui.horizontal(|ui| {
+                ui.label(label);
+                if let Some(realm) = &contact.realm {
+                    ui.label(egui::RichText::new(realm).small());
+                }
+                if app.session.collab_can_invite() && ui.button("Invite").clicked() {
+                    invite_for = Some((contact.node.clone(), contact.name.clone()));
+                }
+                if ui.button("Forget").clicked() {
+                    forget = Some(contact.node.clone());
+                }
+            });
+        }
+        if let Some((node, name)) = invite_for {
+            match app.session.collab_invite_for_from_context(&node, &name, craft_collab::Role::Editor, 24 * 60 * 60 * 1_000) {
+                Ok(line) => {
+                    ctx.copy_text(line.clone());
+                    app.share.minted = Some(line);
+                    let who = if name.is_empty() { short(&node) } else { name };
+                    app.share.status = Some(format!("Invite for {who} copied to the clipboard."));
+                }
+                Err(e) => app.share.status = Some(format!("Could not mint their invite: {e}")),
+            }
+        }
+        if let Some(node) = forget
+            && app.session.collab_forget_contact(&node)
+        {
+            app.share.status = Some(format!("Forgot {}.", short(&node)));
+        }
+    }
 }

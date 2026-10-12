@@ -160,6 +160,14 @@ class Demo:
         for joiner, name in ((j1, "Bob"), (j2, "Carol")):
             joiner.wait_until(lambda i: i.stats()["joined"] and "Host start." in i.text(), 60, f"{name} joined and caught up")
 
+        # 2b. Contacts: the join flow leaves both sides knowing each other —
+        # the host remembers its joiners, each joiner its host.
+        host_contacts = sorted(c["name"] for c in host.contacts())
+        self.check({"Bob", "Carol"} <= set(host_contacts), f"the host remembers both joiners (contacts: {host_contacts})")
+        for joiner, name in ((j1, "Bob"), (j2, "Carol")):
+            seen = sorted(c["name"] for c in joiner.contacts())
+            self.check("Host" in seen, f"{name} remembers the host from the invite (contacts: {seen})")
+
         # 3-6. The story, either as the plain evidence run or as the camera
         # beats of the recorded clip (same checks in both).
         if self.args.screen_record:
@@ -874,6 +882,9 @@ class Instance:
 
     def stats(self):
         return self.request({"method": "engine.execute", "params": {"command": "collab.stats", "params": {}}})["result"]
+
+    def contacts(self):
+        return self.request({"method": "engine.execute", "params": {"command": "collab.contacts", "params": {}}})["result"]["contacts"]
 
     def dump(self):
         return self.request({"method": "engine.execute", "params": {"command": "document.inspect", "params": {}}})["result"]["blocks"]

@@ -293,6 +293,9 @@ pub fn attach(session: &mut Session, path: &str) -> Result<(), String> {
     if let Some(path) = grants_path(&cfg.identity, &cfg.doc) {
         session.collab_set_grants_path(&path);
     }
+    if let Some(path) = contacts_path(&cfg.identity) {
+        session.collab_set_contacts_path(&path);
+    }
     Ok(())
 }
 
@@ -327,6 +330,13 @@ fn join_line(session: &mut Session, identity: &Identity, name: &str, line: &str)
     // installed after it (installing first would be wiped).
     session.collab_join_requesting(&invite.doc, name, Box::new(transport), invite.token.clone(), membership);
     session.collab_set_access(macula_craft_collab::verified_access_from(&invite.doc, &invite.host_key, &invite.profile)?);
+    // The host is the first person this joiner meets: remember them (the
+    // invite carries their name) in this person's own contact list.
+    if let Some(path) = contacts_path(identity.slug()) {
+        session.collab_set_contacts_path(&path);
+    }
+    let realm_name = default_realm_name();
+    session.collab_note_contact(&invite.host, &invite.host_name, Some(realm_name.as_str()));
     Ok(())
 }
 
@@ -344,9 +354,9 @@ fn mesh_config(seed: &str, realm: &str, realm_key: &str) -> Result<MeshConfig, S
     })
 }
 
-/// Where the host's installed grants persist, when a config directory is
-/// known: `craft/collab/<identity>.<doc>.grants.json`.
-fn grants_path(identity: &str, doc: &str) -> Option<String> {
+/// The per-person collaboration directory, when a config directory is
+/// known: `craft/collab/`.
+fn collab_dir() -> Option<std::path::PathBuf> {
     let base = std::env::var("XDG_CONFIG_HOME")
         .ok()
         .filter(|v| !v.is_empty())
@@ -354,8 +364,27 @@ fn grants_path(identity: &str, doc: &str) -> Option<String> {
         .or_else(|| std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".config")))?;
     let dir = base.join("craft").join("collab");
     std::fs::create_dir_all(&dir).ok()?;
-    let safe = |s: &str| s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect::<String>();
-    Some(dir.join(format!("{}.{}.grants.json", safe(identity), safe(doc))).to_string_lossy().to_string())
+    Some(dir)
+}
+
+/// A filename-safe slug for an identity or document id.
+fn safe_slug(s: &str) -> String {
+    s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
+}
+
+/// Where the host's installed grants persist, when a config directory is
+/// known: `craft/collab/<identity>.<doc>.grants.json`.
+fn grants_path(identity: &str, doc: &str) -> Option<String> {
+    let dir = collab_dir()?;
+    Some(dir.join(format!("{}.{}.grants.json", safe_slug(identity), safe_slug(doc))).to_string_lossy().to_string())
+}
+
+/// Where this person's contacts persist, when a config directory is known:
+/// `craft/collab/<identity>.contacts.json` — the person's, not the
+/// document's, so every session shares one list.
+fn contacts_path(identity: &str) -> Option<String> {
+    let dir = collab_dir()?;
+    Some(dir.join(format!("{}.contacts.json", safe_slug(identity))).to_string_lossy().to_string())
 }
 
 fn hex_bytes(s: &str) -> Result<Vec<u8>, String> {

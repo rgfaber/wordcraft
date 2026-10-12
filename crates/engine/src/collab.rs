@@ -80,6 +80,12 @@ pub struct CollabRuntime {
     /// Where the installed grants persist, when the app names a file: a
     /// restarted host re-learns its holders from it.
     grants_path: Option<std::path::PathBuf>,
+    /// The people this device has met (join requests, approved grants, the
+    /// host named by an invite), loaded from `contacts_path`.
+    contacts: craft_collab::Contacts,
+    /// Where the contacts persist, when the app names a file: they belong
+    /// to the person, not the document, so one file serves every session.
+    contacts_path: Option<std::path::PathBuf>,
 }
 
 impl CollabRuntime {
@@ -116,6 +122,8 @@ impl CollabRuntime {
             has_snapshot: false,
             share: None,
             grants_path: None,
+            contacts: craft_collab::Contacts::new(),
+            contacts_path: None,
         }
     }
 
@@ -260,6 +268,53 @@ impl Session {
         if let Ok(json) = serde_json::to_string(&grants) {
             let _ = std::fs::write(path, json);
         }
+    }
+
+    /// Names the file where this person's contacts persist (the app's
+    /// choice), and loads it: a restarted session keeps knowing the people
+    /// it met. Malformed entries are skipped; persistence never takes the
+    /// collaboration down.
+    pub fn collab_set_contacts_path(&mut self, path: &str) {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let contacts = craft_collab::Contacts::from_json(&text);
+            if let Some(c) = self.collab.as_mut() {
+                c.contacts = contacts;
+            }
+        }
+        if let Some(c) = self.collab.as_mut() {
+            c.contacts_path = Some(std::path::PathBuf::from(path));
+        }
+    }
+
+    /// Remembers one sighting of a person: their node id, the name they gave
+    /// (empty keeps what we have) and the realm, when known.
+    pub fn collab_note_contact(&mut self, node: &str, name: &str, realm: Option<&str>) {
+        let now = now_ms();
+        if let Some(c) = self.collab.as_mut() {
+            c.contacts.upsert(node, name, realm, now);
+        }
+        self.collab_save_contacts();
+    }
+
+    /// The people this device has met, most recently seen first.
+    pub fn collab_contacts(&self) -> Vec<craft_collab::Contact> {
+        self.collab.as_ref().map(|c| c.contacts.list()).unwrap_or_default()
+    }
+
+    /// Forgets a person; true when one was known.
+    pub fn collab_forget_contact(&mut self, node: &str) -> bool {
+        let forgotten = self.collab.as_mut().is_some_and(|c| c.contacts.remove(node));
+        if forgotten {
+            self.collab_save_contacts();
+        }
+        forgotten
+    }
+
+    /// Writes the contacts to the persisted file, if one is named.
+    fn collab_save_contacts(&self) {
+        let Some(c) = self.collab.as_ref() else { return };
+        let Some(path) = c.contacts_path.as_ref() else { return };
+        let _ = std::fs::write(path, c.contacts.to_json());
     }
 
     /// Stores the realm membership status the app read for this session's
@@ -822,6 +877,9 @@ impl Session {
             }
             return;
         };
+        // The person at the door is someone we have met: remember them. A
+        // stranger with a bad token never reaches this point.
+        self.collab_note_contact(author, name, None);
         let auto = matches!(&self.collab, Some(c) if c.auto_approve);
         if auto {
             self.collab_issue_grant(author, role, now);
@@ -911,6 +969,7 @@ impl Session {
             "awaitingGrant": c.awaiting_grant,
             "realmShare": c.member_verifier.is_some(),
             "pending": c.pending.iter().map(|(node, (name, _, _))| json!({"node": short(node), "name": name})).collect::<Vec<_>>(),
+            "contacts": c.contacts.len(),
         })
     }
 
@@ -1500,6 +1559,56 @@ mod tests {
         host.collab_tick();
         bob.collab_tick();
         assert_eq!(bob.collab_stats()["joined"], true, "the hand-approved joiner lands");
+    }
+
+    #[test]
+    fn join_requests_land_in_the_contacts_and_survive_a_restart() {
+        let file = std::env::temp_dir().join(format!("wordcraft-contacts-{}-{}.json", std::process::id(), now_ms()));
+        let path = file.to_str().expect("temp path");
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb"]);
+        let (ta, tb) = (bus.remove(0), bus.remove(0));
+        let mut host = session();
+        let mut bob = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        host.collab_set_access(host_table());
+        host.collab_set_issuer(Box::new(TestIssuer { host: "aaaaaaaa".into() }));
+        host.collab_set_contacts_path(path);
+        // auto_approve stays off: this joiner waits, and is remembered anyway.
+
+        bob.collab_join_via_invite("demo", "Bob", Box::new(tb), token("aaaaaaaa", craft_collab::Role::Editor));
+        bob.collab_set_access(host_table());
+        bob.collab_tick();
+        host.collab_tick();
+
+        let contacts = host.collab_contacts();
+        assert_eq!(contacts.len(), 1, "the waiting joiner is remembered");
+        assert_eq!(contacts[0].node, "bbbbbbbb");
+        assert_eq!(contacts[0].name, "Bob");
+        assert_eq!(host.collab_pending().len(), 1, "and still waits for the yes");
+
+        host.collab_approve("bbbbbbbb").expect("approve");
+        assert_eq!(host.collab_contacts().len(), 1, "approving does not duplicate the person");
+        assert!(host.collab_pending().is_empty());
+
+        // The joiner remembers its host, realm and all.
+        bob.collab_note_contact("aaaaaaaa", "Host", Some("io.macula"));
+        let bobs = bob.collab_contacts();
+        assert_eq!(bobs[0].name, "Host");
+        assert_eq!(bobs[0].realm.as_deref(), Some("io.macula"));
+
+        // A restarted host reads the same people back from the same file.
+        let mut restarted = session();
+        restarted.collab_attach("demo", "Host", Box::new(MemoryTransport::bus(&["aaaaaaaa"]).remove(0)));
+        restarted.collab_set_contacts_path(path);
+        let back = restarted.collab_contacts();
+        assert_eq!(back.len(), 1, "contacts persist across restarts");
+        assert_eq!(back[0].name, "Bob");
+
+        assert!(restarted.collab_forget_contact("bbbbbbbb"));
+        assert!(restarted.collab_contacts().is_empty());
+        let text = std::fs::read_to_string(&file).expect("the file is there");
+        assert!(!text.contains("Bob"), "the write-through removed the person");
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]

@@ -20,6 +20,8 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("collab.approve", "Approve a Joiner", "Agents", approve).params(r#"{"node": string}"#).pure(),
         CommandSpec::new("collab.revoke", "Revoke a Holder", "Agents", revoke).params(r#"{"node": string}"#).pure(),
         CommandSpec::new("collab.pending", "Pending Join Requests", "Agents", |s, _| pending(s)).params("{}").pure(),
+        CommandSpec::new("collab.contacts", "List Contacts", "Agents", |s, _| contacts(s)).params("{}").pure(),
+        CommandSpec::new("collab.forget_contact", "Forget a Contact", "Agents", forget_contact).params(r#"{"node": string}"#).pure(),
         CommandSpec::new("collab.realm", "Realm Membership", "Agents", |s, _| Ok(s.collab_realm())).params("{}").pure(),
     ]
 }
@@ -83,6 +85,23 @@ fn pending(s: &mut Session) -> CmdResult {
     }))
 }
 
+fn contacts(s: &mut Session) -> CmdResult {
+    Ok(json!({
+        "contacts": s.collab_contacts().into_iter().map(|c| json!({
+            "node": c.node,
+            "name": c.name,
+            "lastSeenMs": c.last_seen_ms,
+            "realm": c.realm,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+/// Forgets a remembered person (the Share window's Forget button does this too).
+fn forget_contact(s: &mut Session, v: &Value) -> CmdResult {
+    let node = p::req_str(v, "node")?;
+    Ok(json!({"forgotten": s.collab_forget_contact(node)}))
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -110,5 +129,19 @@ mod tests {
         let r = s.run("collab.realm", &json!({})).expect("realm");
         assert_eq!(r["tier"], "device");
         assert_eq!(r["ucanExpiresMs"], 123);
+    }
+
+    #[test]
+    fn contacts_are_listed_and_forgotten_by_command() {
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        assert_eq!(s.run("collab.contacts", &json!({})).expect("contacts")["contacts"].as_array().map(Vec::len), Some(0));
+        s.collab_attach("demo", "Me", Box::new(craft_collab::MemoryTransport::bus(&["aaaaaaaa"]).remove(0)));
+        s.collab_note_contact("bbbbbbbb", "Bob", Some("io.macula"));
+        let listed = s.run("collab.contacts", &json!({})).expect("contacts");
+        assert_eq!(listed["contacts"][0]["name"], "Bob");
+        assert_eq!(listed["contacts"][0]["realm"], "io.macula");
+        assert_eq!(s.run("collab.forget_contact", &json!({"node": "bbbbbbbb"})).expect("forget")["forgotten"], true);
+        assert_eq!(s.run("collab.contacts", &json!({})).expect("contacts")["contacts"].as_array().map(Vec::len), Some(0));
+        assert!(s.run("collab.forget_contact", &json!({})).is_err(), "node is required");
     }
 }

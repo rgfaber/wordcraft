@@ -330,7 +330,9 @@
 	Design	デザイン
 	To open Word documents with WordCraft by default: select one in Finder, choose File › Get Info, pick WordCraft under Open with, then click Change All.	Word 文書を既定で WordCraft で開くには: Finder で文書を選び、ファイル › 情報を見る を選んで、「このアプリケーションで開く」で WordCraft を選び、「すべてを変更」をクリックします。
 	WordCraft is now the default app for Word documents.	WordCraft が Word 文書の既定のアプリになりました。
+	Forget a Contact	連絡先を削除
 	Invite to Document	文書に招待
+	List Contacts	連絡先一覧
 	Pending Join Requests	保留中の参加リクエスト
 	Realm Membership	レルムのメンバーシップ
 	Revoke a Holder	アクセス権を取り消す

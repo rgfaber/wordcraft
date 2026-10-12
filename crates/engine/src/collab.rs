@@ -65,8 +65,9 @@ pub struct CollabRuntime {
     awaiting_grant: bool,
     grant_attempts: u32,
     last_grant_ms: u64,
-    /// Join requests waiting for the host's yes: node id -> (name, at_ms).
-    pending: std::collections::BTreeMap<String, (String, u64, craft_collab::Role)>,
+    /// Join requests waiting for the host's yes: node id -> (name, at_ms,
+    /// role, and the membership's own end when the admission was one).
+    pending: std::collections::BTreeMap<String, (String, u64, craft_collab::Role, Option<u64>)>,
     /// Whether the host admits a valid token without asking.
     auto_approve: bool,
     /// Whether this session holds the document: the origin (attach) does
@@ -391,7 +392,8 @@ impl Session {
     }
 
     /// The host shares this document with a realm: members presenting a live
-    /// membership UCAN of that realm are admitted with the verifier's role.
+    /// membership UCAN of that realm are admitted with the verifier's role,
+    /// and the grant issued on one is capped at the membership's own end.
     pub fn collab_set_member_verifier(&mut self, verifier: Box<dyn craft_collab::MembershipVerifier>) {
         if let Some(c) = self.collab.as_mut() {
             c.member_verifier = Some(verifier);
@@ -405,23 +407,24 @@ impl Session {
 
     /// Join requests awaiting the host's yes: (node id, display name).
     pub fn collab_pending(&self) -> Vec<(String, String)> {
-        self.collab.as_ref().map(|c| c.pending.iter().map(|(node, (name, _, _))| (node.clone(), name.clone())).collect()).unwrap_or_default()
+        self.collab.as_ref().map(|c| c.pending.iter().map(|(node, (name, _, _, _))| (node.clone(), name.clone())).collect()).unwrap_or_default()
     }
 
     /// The host approves a pending joiner: mints the grant from its token's
-    /// role, broadcasts it and installs it.
+    /// role (capped by the membership's end when the admission was one),
+    /// broadcasts it and installs it.
     pub fn collab_approve(&mut self, node: &str) -> Result<(), String> {
-        let role = {
+        let (role, ends_ms) = {
             let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
-            let Some((_, _, role)) = c.pending.get(node) else {
+            let Some((_, _, role, ends_ms)) = c.pending.get(node) else {
                 return Err("no such pending joiner".into());
             };
-            *role
+            (*role, *ends_ms)
         };
         if self.collab.as_ref().and_then(|c| c.issuer.as_ref()).is_none() {
             return Err("this session is not the host".into());
         }
-        self.collab_issue_grant(node, role, now_ms());
+        self.collab_issue_grant(node, role, now_ms(), ends_ms);
         Ok(())
     }
 
@@ -845,7 +848,7 @@ impl Session {
     /// host's yes); an invalid one is refused and counted.
     fn collab_on_join_request(&mut self, author: &str, token: &Option<craft_collab::SignedGrant>, membership: &Option<String>, name: &str) {
         let now = now_ms();
-        let mut admitted: Option<craft_collab::Role> = None;
+        let mut admitted: Option<(craft_collab::Role, Option<u64>)> = None;
         {
             let Some(c) = self.collab.as_mut() else { return };
             if c.issuer.is_none() {
@@ -856,18 +859,19 @@ impl Session {
                 && let Some(access) = c.access.as_ref()
                 && let Ok(checked) = access.check_token_for(token, author, now)
             {
-                admitted = Some(checked.role);
+                admitted = Some((checked.role, None));
             }
             // A realm membership: the verifier holds the realm's key and the
-            // host's role mapping; the audience check pins the caller.
+            // host's role mapping; the audience check pins the caller, and
+            // the membership's own end caps any grant issued on it.
             if admitted.is_none()
                 && let (Some(verifier), Some(ucan)) = (c.member_verifier.as_ref(), membership.as_ref())
-                && verifier.verify_member(ucan, author, now).is_ok()
+                && let Ok(ends_ms) = verifier.verify_member(ucan, author, now)
             {
-                admitted = Some(verifier.role());
+                admitted = Some((verifier.role(), Some(ends_ms)));
             }
         }
-        let Some(role) = admitted else {
+        let Some((role, ends_ms)) = admitted else {
             // A stranger at the door: refused and counted (the old code
             // returned silently; the count is the honest signal).
             if let Some(c) = self.collab.as_mut()
@@ -877,24 +881,43 @@ impl Session {
             }
             return;
         };
+        // A membership that has already ended is not an admission: there is
+        // nothing to grant, so the door refuses like any other stranger.
+        if ends_ms.is_some_and(|ends| ends <= now) {
+            if let Some(c) = self.collab.as_mut()
+                && c.issuer.is_some()
+            {
+                c.unauthorized += 1;
+            }
+            return;
+        }
         // The person at the door is someone we have met: remember them. A
         // stranger with a bad token never reaches this point.
         self.collab_note_contact(author, name, None);
         let auto = matches!(&self.collab, Some(c) if c.auto_approve);
         if auto {
-            self.collab_issue_grant(author, role, now);
+            self.collab_issue_grant(author, role, now, ends_ms);
         } else if let Some(c) = self.collab.as_mut() {
-            c.pending.insert(author.to_string(), (name.to_string(), now, role));
+            c.pending.insert(author.to_string(), (name.to_string(), now, role, ends_ms));
         }
     }
 
-    /// Mints a grant for `holder` as the host, broadcasts it and installs it
-    /// locally.
-    fn collab_issue_grant(&mut self, holder: &str, role: craft_collab::Role, now: u64) {
+    /// Mints a grant for `holder` as the host, broadcasts it and installs it.
+    /// `ends_ms` is the membership's own end when the admission was one: the
+    /// grant never outlives it, so a revoked or lapsed membership takes the
+    /// document access down with it.
+    fn collab_issue_grant(&mut self, holder: &str, role: craft_collab::Role, now: u64, ends_ms: Option<u64>) {
+        let ttl_ms = match ends_ms {
+            Some(ends) => GRANT_TTL_MS.min(ends.saturating_sub(now)),
+            None => GRANT_TTL_MS,
+        };
+        if ttl_ms == 0 {
+            return; // nothing left of the membership: nothing to grant
+        }
         let issued = {
             let Some(c) = self.collab.as_ref() else { return };
             let Some(issuer) = c.issuer.as_ref() else { return };
-            match issuer.issue(&c.doc, holder, role, GRANT_TTL_MS, now) {
+            match issuer.issue(&c.doc, holder, role, ttl_ms, now) {
                 Ok(signed) => signed,
                 Err(_) => return,
             }
@@ -968,7 +991,7 @@ impl Session {
             "access": c.access.is_some(),
             "awaitingGrant": c.awaiting_grant,
             "realmShare": c.member_verifier.is_some(),
-            "pending": c.pending.iter().map(|(node, (name, _, _))| json!({"node": short(node), "name": name})).collect::<Vec<_>>(),
+            "pending": c.pending.iter().map(|(node, (name, _, _, _))| json!({"node": short(node), "name": name})).collect::<Vec<_>>(),
             "contacts": c.contacts.len(),
         })
     }
@@ -1396,18 +1419,20 @@ mod tests {
     }
 
     /// A stand-in realm-membership verifier: one accepted UCAN string, one
-    /// role. The real verification is the adapter's.
+    /// role, and when the membership ends (None: no end). The real
+    /// verification is the adapter's.
     struct TestMemberVerifier {
         accepts: String,
         role: craft_collab::Role,
+        ends_ms: Option<u64>,
     }
 
     impl craft_collab::MembershipVerifier for TestMemberVerifier {
-        fn verify_member(&self, ucan: &str, node_id: &str, _now_ms: u64) -> Result<(), String> {
+        fn verify_member(&self, ucan: &str, node_id: &str, _now_ms: u64) -> Result<u64, String> {
             if node_id.is_empty() {
                 return Err("no node".into());
             }
-            if ucan == self.accepts { Ok(()) } else { Err("not a member".into()) }
+            if ucan == self.accepts { Ok(self.ends_ms.unwrap_or(u64::MAX)) } else { Err("not a member".into()) }
         }
 
         fn role(&self) -> craft_collab::Role {
@@ -1677,7 +1702,11 @@ mod tests {
         host.collab_set_access(host_table());
         host.collab_set_issuer(Box::new(TestIssuer { host: "aaaaaaaa".into() }));
         host.collab_set_auto_approve(true);
-        host.collab_set_member_verifier(Box::new(TestMemberVerifier { accepts: "member-good".into(), role: craft_collab::Role::Viewer }));
+        host.collab_set_member_verifier(Box::new(TestMemberVerifier {
+            accepts: "member-good".into(),
+            role: craft_collab::Role::Viewer,
+            ends_ms: None,
+        }));
         host.run("text.insert", &json!({"text": "shared "})).expect("Host types");
 
         // The joiner has no invite token at all: a realm membership is its
@@ -1711,7 +1740,11 @@ mod tests {
         host.collab_set_access(host_table());
         host.collab_set_issuer(Box::new(TestIssuer { host: "aaaaaaaa".into() }));
         host.collab_set_auto_approve(true);
-        host.collab_set_member_verifier(Box::new(TestMemberVerifier { accepts: "member-good".into(), role: craft_collab::Role::Editor }));
+        host.collab_set_member_verifier(Box::new(TestMemberVerifier {
+            accepts: "member-good".into(),
+            role: craft_collab::Role::Editor,
+            ends_ms: None,
+        }));
 
         bea.collab_join_requesting("demo", "Mallory", Box::new(tb), None, Some("member-bad".into()));
         bea.collab_set_access(host_table());
@@ -1724,6 +1757,74 @@ mod tests {
         assert!(host.collab_stats()["unauthorized"].as_u64().unwrap_or(0) >= 1, "the door refused the forged membership");
         assert_eq!(bea.collab_stats()["awaitingGrant"], true, "and the joiner is still waiting");
         assert_eq!(bea.doc.plain_text(StoryRef::Body), "", "nothing arrived");
+    }
+
+    /// A realm member's grant never outlives their membership: the door caps
+    /// it at the UCAN's own end, so a revoked or lapsed membership takes the
+    /// document access down with it (the cascade).
+    #[test]
+    fn a_member_grant_never_outlives_the_membership() {
+        let file = std::env::temp_dir().join(format!("wordcraft-member-grant-{}-{}.json", std::process::id(), now_ms()));
+        let path = file.to_str().expect("temp path");
+        let membership_end = now_ms() + 60_000;
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb"]);
+        let (ta, tb) = (bus.remove(0), bus.remove(0));
+        let mut host = session();
+        let mut bea = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        host.collab_set_access(host_table());
+        host.collab_set_issuer(Box::new(TestIssuer { host: "aaaaaaaa".into() }));
+        host.collab_set_grants_path(path);
+        host.collab_set_member_verifier(Box::new(TestMemberVerifier {
+            accepts: "member-ends-soon".into(),
+            role: craft_collab::Role::Editor,
+            ends_ms: Some(membership_end),
+        }));
+
+        bea.collab_join_requesting("demo", "Bea", Box::new(tb), None, Some("member-ends-soon".into()));
+        bea.collab_set_access(host_table());
+        bea.collab_tick();
+        host.collab_tick();
+        assert_eq!(host.collab_pending().len(), 1, "the member waits for the yes");
+
+        host.collab_approve("bbbbbbbb").expect("approve");
+        let text = std::fs::read_to_string(&file).expect("the grant persisted");
+        let grants: Vec<craft_collab::SignedGrant> = serde_json::from_str(&text).expect("grants");
+        let grant = grants.first().expect("one grant");
+        assert_eq!(grant.grant.role, craft_collab::Role::Editor, "the verifier's role");
+        assert!(grant.grant.expires_ms <= membership_end, "the grant does not outlive the membership");
+        assert!(grant.grant.expires_ms > now_ms(), "but is live now");
+        let _ = std::fs::remove_file(&file);
+    }
+
+    /// A membership that has already ended is not an admission: the door
+    /// refuses it like any other stranger.
+    #[test]
+    fn a_membership_that_has_ended_admits_nobody() {
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb"]);
+        let (ta, tb) = (bus.remove(0), bus.remove(0));
+        let mut host = session();
+        let mut bea = session();
+        host.collab_attach("demo", "Host", Box::new(ta));
+        host.collab_set_access(host_table());
+        host.collab_set_issuer(Box::new(TestIssuer { host: "aaaaaaaa".into() }));
+        host.collab_set_auto_approve(true);
+        host.collab_set_member_verifier(Box::new(TestMemberVerifier {
+            accepts: "member-ended".into(),
+            role: craft_collab::Role::Editor,
+            ends_ms: Some(now_ms().saturating_sub(1)),
+        }));
+
+        bea.collab_join_requesting("demo", "Bea", Box::new(tb), None, Some("member-ended".into()));
+        bea.collab_set_access(host_table());
+        bea.collab_tick();
+        host.collab_tick();
+        bea.collab_tick();
+
+        assert!(host.collab_pending().is_empty(), "nothing waits for a yes");
+        assert_eq!(host.collab_holders().len(), 0, "no grant was issued");
+        assert!(host.collab_stats()["unauthorized"].as_u64().unwrap_or(0) >= 1, "and the refusal is counted");
+        assert_eq!(bea.collab_stats()["awaitingGrant"], true, "the joiner is still waiting");
     }
 
     /// An invite minted for one person admits only that node: the token's

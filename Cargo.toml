@@ -29,7 +29,7 @@ wordcraft-control-key = { path = "crates/control-key" }
 wordcraft-ui-egui = { path = "crates/ui-egui" }
 wordcraft-metafile = { path = "crates/metafile" }
 # the shared Craft collaboration seam (spike branch in the craft-libs fork)
-craft-collab = { package = "macula-craft-seam", version = "0.2" }
+craft-collab = { package = "macula-craft-seam", version = "0.3" }
 # its mesh transport (local spike repo, macula-rust released crates only)
 macula-craft-collab = "0.2"
 

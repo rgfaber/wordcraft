@@ -1,179 +1,37 @@
-//! The collaboration glue: craft-collab's shared mechanism attached to a session.
+//! The collaboration glue: the seam's shared session attached to a WordCraft session.
 //!
-//! Wordcraft's adoption of the seam. Local typing is captured as an exact
-//! paragraph text update (stable pid, caret, text); every other mutating
-//! command is captured as a [`Command`](craft_collab::Kind::Command) op with
-//! the selection it ran under, which the peers replay through the same
-//! registry with [`Origin::Remote`](craft_collab::Origin). Peer messages are
-//! applied in per-author sequence (text updates are order-insensitive; a
-//! command is not), outside the local undo history; undo reverts only this
-//! author's own edits. Received edits also carry a latency sample.
+//! The protocol (join, grants, invites, contacts, snapshots, ordering,
+//! presence, latency) is the seam's [`craft_collab::CollabSession`]; this
+//! module is WordCraft's adoption of it. Local typing is captured as an exact
+//! paragraph text update (stable pid, caret, text), paragraph structure as
+//! leader splits and joins on the shared body text, and every other mutating
+//! command as a [`Command`](craft_collab::Kind::Command) op with the selection
+//! it ran under, which the peers replay through the same registry with
+//! [`Origin::Remote`](craft_collab::Origin). Peer edits apply outside the
+//! local undo history; undo reverts only this author's own edits.
 
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use wordcraft_doc::{Document, Pos};
 
+#[cfg(test)]
+use craft_collab::now_ms;
+
 use crate::{CmdError, Session};
 
-/// How long a grant issued on a join lasts, when the caller names nothing.
-const GRANT_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
-
-/// How many times a joiner asks for admission before giving up.
-const MAX_GRANT_ATTEMPTS: u32 = 5;
-
-/// Everything a shared session needs: the peers' transport, the text CRDT,
-/// the ordering buffer, the presence table and the latency samples.
+/// A shared session: the seam's protocol state plus what only WordCraft
+/// keeps.
 pub struct CollabRuntime {
-    doc: String,
-    name: String,
-    author: String,
-    transport: Box<dyn craft_collab::Transport>,
-    texts: craft_collab::TextMerge,
-    presence: craft_collab::Presence,
-    order: craft_collab::OrderBuffer,
-    /// Received-edit latency per author, milliseconds.
-    latency: HashMap<String, Vec<u64>>,
-    /// Remote commands that failed to apply (a divergence signal).
-    remote_errors: u64,
-    /// Messages dropped by the access check (stranger, expired, wrong role).
-    unauthorized: u64,
-    /// Who may act on this document, when access control is on.
-    access: Option<craft_collab::Access>,
-    seq: u64,
-    /// This process's epoch: a restart keeps its author id but sends a new
-    /// epoch, so peers never confuse its restarted sequence with the old.
-    epoch: u64,
-    last_cursor: Option<String>,
-    /// This session asked for the document snapshot and is waiting for it.
-    awaiting_snapshot: bool,
-    /// How many snapshot requests have been sent, and when the last was.
-    snapshot_attempts: u32,
-    last_snapshot_ms: u64,
-    /// The host's signing side, when this session is the host: what mints
-    /// grants and revocations on a join.
-    issuer: Option<Box<dyn craft_collab::GrantIssuer>>,
-    /// A joiner's open token: presented until a grant arrives.
-    token: Option<craft_collab::SignedGrant>,
-    /// A joiner's realm membership UCAN, when it joins by membership.
-    membership: Option<String>,
-    /// The host's realm-member verifier: when set, the document is shared
-    /// with that realm and a live membership admits.
-    member_verifier: Option<Box<dyn craft_collab::MembershipVerifier>>,
-    /// This joiner is waiting for its grant.
-    awaiting_grant: bool,
-    grant_attempts: u32,
-    last_grant_ms: u64,
-    /// Join requests waiting for the host's yes: node id -> (name, at_ms,
-    /// role, and the membership's own end when the admission was one).
-    pending: std::collections::BTreeMap<String, (String, u64, craft_collab::Role, Option<u64>)>,
+    shared: craft_collab::CollabSession,
     /// Body paragraphs a join took out, by id: an undo (or a peer's) can
     /// bring one back, with its formatting.
     graveyard: HashMap<u64, wordcraft_doc::Paragraph>,
-    /// Whether the host admits a valid token without asking.
-    auto_approve: bool,
-    /// Whether this session holds the document: the origin (attach) does
-    /// from the start; a joiner only once it has loaded a snapshot. An
-    /// approved joiner that has not caught up yet must never answer another
-    /// joiner's snapshot request with its empty document.
-    has_snapshot: bool,
-    /// The mesh coordinates this host shares in: (realm, realm key, seed,
-    /// signing profile). Opaque here; the invite carries them for a joiner.
-    share: Option<(String, String, String, String)>,
-    /// Where the installed grants persist, when the app names a file: a
-    /// restarted host re-learns its holders from it.
-    grants_path: Option<std::path::PathBuf>,
-    /// The people this device has met (join requests, approved grants, the
-    /// host named by an invite), loaded from `contacts_path`.
-    contacts: craft_collab::Contacts,
-    /// Where the contacts persist, when the app names a file: they belong
-    /// to the person, not the document, so one file serves every session.
-    contacts_path: Option<std::path::PathBuf>,
 }
 
 impl CollabRuntime {
-    fn new(doc: &str, name: &str, transport: Box<dyn craft_collab::Transport>) -> CollabRuntime {
-        let author = transport.author();
-        let texts = craft_collab::TextMerge::new(&author);
-        CollabRuntime {
-            doc: doc.to_string(),
-            name: name.to_string(),
-            author,
-            transport,
-            texts,
-            presence: craft_collab::Presence::default(),
-            order: craft_collab::OrderBuffer::default(),
-            latency: HashMap::new(),
-            remote_errors: 0,
-            unauthorized: 0,
-            access: None,
-            seq: 0,
-            epoch: now_ms().wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (std::process::id() as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9),
-            last_cursor: None,
-            awaiting_snapshot: false,
-            snapshot_attempts: 0,
-            last_snapshot_ms: 0,
-            issuer: None,
-            token: None,
-            membership: None,
-            member_verifier: None,
-            awaiting_grant: false,
-            grant_attempts: 0,
-            last_grant_ms: 0,
-            pending: std::collections::BTreeMap::new(),
-            graveyard: HashMap::new(),
-            auto_approve: false,
-            has_snapshot: false,
-            share: None,
-            grants_path: None,
-            contacts: craft_collab::Contacts::new(),
-            contacts_path: None,
-        }
-    }
-
-    /// The messages for this document from other authors, in per-author
-    /// sequence.
-    fn poll(&mut self) -> Vec<craft_collab::Message> {
-        let doc = self.doc.clone();
-        let author = self.author.clone();
-        let mut out = Vec::new();
-        for msg in self.transport.poll() {
-            if msg.doc == doc && msg.author != author {
-                out.extend(self.order.push(msg));
-            }
-        }
-        out
-    }
-
-    /// Queues a message for the peers.
-    fn send(&mut self, kind: craft_collab::Kind) {
-        self.seq += 1;
-        let msg = craft_collab::Message {
-            doc: self.doc.clone(),
-            author: self.author.clone(),
-            epoch: self.epoch,
-            seq: self.seq,
-            sent_at_ms: now_ms(),
-            kind,
-        };
-        let _ = self.transport.send(msg);
-    }
-}
-
-/// Milliseconds since the epoch (0 where there is no clock).
-/// Milliseconds since the UNIX epoch, 0 on wasm: a clockless peer holds no
-/// live grant (grants require a wall clock to be live), so collaboration is
-/// only wired where a real clock exists (native builds; wasm has no
-/// transport).
-pub(crate) fn now_ms() -> u64 {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        0
+    fn new(shared: craft_collab::CollabSession) -> CollabRuntime {
+        CollabRuntime { shared, graveyard: HashMap::new() }
     }
 }
 
@@ -184,193 +42,45 @@ pub struct PeerView {
     pub pos: Option<Pos>,
 }
 
+/// One of the app's own collaboration files (grants, contacts). They are the
+/// app's folders, not a command's, so automation roots don't apply
+/// ([`crate::file_access::unconfined`]).
+struct AppFile(String);
+
+impl craft_collab::TextStore for AppFile {
+    fn read(&self) -> Option<String> {
+        crate::file_access::unconfined(|| crate::io::read_file(&self.0)).ok().and_then(|b| String::from_utf8(b).ok())
+    }
+
+    /// A failed write never takes the collaboration down.
+    fn write(&self, text: &str) {
+        if let Err(e) = crate::file_access::unconfined(|| crate::io::write_file(&self.0, text.as_bytes())) {
+            log::warn!("collab: {e}");
+        }
+    }
+}
+
 impl Session {
-    /// Starts collaborating on `doc` as `name`, over `transport`.
+    fn shared(&self) -> Option<&craft_collab::CollabSession> {
+        self.collab.as_ref().map(|c| &c.shared)
+    }
+
+    fn shared_mut(&mut self) -> Option<&mut craft_collab::CollabSession> {
+        self.collab.as_mut().map(|c| &mut c.shared)
+    }
+
+    /// Starts collaborating on `doc` as `name`, over `transport`: the body
+    /// seeds the shared text (joiners receive it in the snapshot).
     pub fn collab_attach(&mut self, doc: &str, name: &str, transport: Box<dyn craft_collab::Transport>) {
-        let mut runtime = CollabRuntime::new(doc, name, transport);
-        // The origin starts with the document itself: its body seeds the
-        // shared text (joiners receive it in the snapshot).
-        runtime.has_snapshot = true;
-        runtime.texts.seed_body(&body_paragraphs_of(&self.doc));
-        self.collab = Some(runtime);
+        let body = body_paragraphs_of(&self.doc);
+        self.collab = Some(CollabRuntime::new(craft_collab::CollabSession::host(doc, name, transport, &body)));
     }
 
     /// Joins an already-shared `doc` as `name`: the first tick asks a peer
     /// for the document snapshot, so stable paragraph ids line up before
     /// this author types.
     pub fn collab_join(&mut self, doc: &str, name: &str, transport: Box<dyn craft_collab::Transport>) {
-        let mut runtime = CollabRuntime::new(doc, name, transport);
-        runtime.awaiting_snapshot = true;
-        self.collab = Some(runtime);
-    }
-
-    /// Whether this session is sharing its document.
-    pub fn collab_active(&self) -> bool {
-        self.collab.is_some()
-    }
-
-    /// Turns on access control for this document: only the host and live
-    /// grant holders act. Without it the session is open (spike mode).
-    pub fn collab_set_access(&mut self, access: craft_collab::Access) {
-        if let Some(c) = self.collab.as_mut() {
-            c.access = Some(access);
-        }
-    }
-
-    /// Installs the host's signing side: with it, this session answers join
-    /// requests with grants.
-    pub fn collab_set_issuer(&mut self, issuer: Box<dyn craft_collab::GrantIssuer>) {
-        if let Some(c) = self.collab.as_mut() {
-            c.issuer = Some(issuer);
-        }
-    }
-
-    /// Whether the host admits a valid token without asking (the UI leaves
-    /// this off and approves from `collab_pending`).
-    pub fn collab_set_auto_approve(&mut self, on: bool) {
-        if let Some(c) = self.collab.as_mut() {
-            c.auto_approve = on;
-        }
-    }
-
-    /// Remembers the mesh coordinates this host shares in, so the UI can
-    /// mint an invite with one call.
-    pub fn collab_set_share_context(&mut self, realm: &str, realm_key: &str, seed: &str, profile: &str) {
-        if let Some(c) = self.collab.as_mut() {
-            c.share = Some((realm.to_string(), realm_key.to_string(), seed.to_string(), profile.to_string()));
-        }
-    }
-
-    /// The holders of this document (the UI's People list), sorted.
-    pub fn collab_holders(&self) -> Vec<String> {
-        self.collab.as_ref().and_then(|c| c.access.as_ref()).map(|a| a.holder_ids()).unwrap_or_default()
-    }
-
-    /// Names the file where installed grants persist (the app's choice),
-    /// and loads it: a restarted host re-learns its holders and a restarted
-    /// holder its own grant. Malformed or unverifiable entries are skipped;
-    /// persistence never takes the collaboration down.
-    pub fn collab_set_grants_path(&mut self, path: &str) {
-        let now = now_ms();
-        if let Some(c) = self.collab.as_mut() {
-            c.grants_path = Some(std::path::PathBuf::from(path));
-        }
-        let Some(text) = read_app_file(path) else { return };
-        let Ok(grants) = serde_json::from_str::<Vec<craft_collab::SignedGrant>>(&text) else { return };
-        if let Some(c) = self.collab.as_mut()
-            && let Some(access) = c.access.as_mut()
-        {
-            for signed in &grants {
-                let _ = access.install(signed, now);
-            }
-        }
-    }
-
-    /// Writes the installed grants to the persisted file, if one is named.
-    fn collab_save_grants(&self) {
-        let Some(c) = self.collab.as_ref() else { return };
-        let Some(path) = c.grants_path.as_ref() else { return };
-        let Some(access) = c.access.as_ref() else { return };
-        let grants = access.signed_grants();
-        if let Ok(json) = serde_json::to_string(&grants) {
-            write_app_file(path, json.as_bytes());
-        }
-    }
-
-    /// Names the file where this person's contacts persist (the app's
-    /// choice), and loads it: a restarted session keeps knowing the people
-    /// it met. Malformed entries are skipped; persistence never takes the
-    /// collaboration down.
-    pub fn collab_set_contacts_path(&mut self, path: &str) {
-        if let Some(text) = read_app_file(path) {
-            let contacts = craft_collab::Contacts::from_json(&text);
-            if let Some(c) = self.collab.as_mut() {
-                c.contacts = contacts;
-            }
-        }
-        if let Some(c) = self.collab.as_mut() {
-            c.contacts_path = Some(std::path::PathBuf::from(path));
-        }
-    }
-
-    /// Remembers one sighting of a person: their node id, the name they gave
-    /// (empty keeps what we have) and the realm, when known.
-    pub fn collab_note_contact(&mut self, node: &str, name: &str, realm: Option<&str>) {
-        let now = now_ms();
-        if let Some(c) = self.collab.as_mut() {
-            c.contacts.upsert(node, name, realm, now);
-        }
-        self.collab_save_contacts();
-    }
-
-    /// The people this device has met, most recently seen first.
-    pub fn collab_contacts(&self) -> Vec<craft_collab::Contact> {
-        self.collab.as_ref().map(|c| c.contacts.list()).unwrap_or_default()
-    }
-
-    /// Forgets a person; true when one was known.
-    pub fn collab_forget_contact(&mut self, node: &str) -> bool {
-        let forgotten = self.collab.as_mut().is_some_and(|c| c.contacts.remove(node));
-        if forgotten {
-            self.collab_save_contacts();
-        }
-        forgotten
-    }
-
-    /// Writes the contacts to the persisted file, if one is named.
-    fn collab_save_contacts(&self) {
-        let Some(c) = self.collab.as_ref() else { return };
-        let Some(path) = c.contacts_path.as_ref() else { return };
-        write_app_file(path, c.contacts.to_json().as_bytes());
-    }
-
-    /// Stores the realm membership status the app read for this session's
-    /// identity (`collab.realm` reports it back).
-    pub fn collab_set_realm(&mut self, status: serde_json::Value) {
-        self.realm = Some(status);
-    }
-
-    /// The realm membership status, or a bare not-signed-in answer.
-    pub fn collab_realm(&self) -> serde_json::Value {
-        self.realm.clone().unwrap_or_else(|| serde_json::json!({"signedIn": false}))
-    }
-
-    /// Whether this session can mint invites (it is the host and knows its
-    /// mesh coordinates).
-    pub fn collab_can_invite(&self) -> bool {
-        self.collab.as_ref().is_some_and(|c| c.issuer.is_some() && c.share.is_some())
-    }
-
-    /// Mints an invite for one person from the remembered share context:
-    /// the token names their node id, and only that node is admitted.
-    pub fn collab_invite_for_from_context(
-        &mut self,
-        holder: &str,
-        invitee_name: &str,
-        role: craft_collab::Role,
-        ttl_ms: u64,
-    ) -> Result<String, String> {
-        let (realm, realm_key, seed, profile) = {
-            let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
-            let Some((realm, realm_key, seed, profile)) = c.share.as_ref() else {
-                return Err("this session does not know its mesh coordinates".into());
-            };
-            (realm.clone(), realm_key.clone(), seed.clone(), profile.clone())
-        };
-        self.collab_mint_invite_for(&realm, &realm_key, &seed, &profile, holder, invitee_name, role, ttl_ms)
-    }
-
-    /// Mints an invite from the remembered share context (the UI's Copy
-    /// invite): `role` and `ttl_ms` as in `collab_mint_invite`.
-    pub fn collab_invite_from_context(&mut self, role: craft_collab::Role, ttl_ms: u64) -> Result<String, String> {
-        let (realm, realm_key, seed, profile) = {
-            let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
-            let Some((realm, realm_key, seed, profile)) = c.share.as_ref() else {
-                return Err("this session does not know its mesh coordinates".into());
-            };
-            (realm.clone(), realm_key.clone(), seed.clone(), profile.clone())
-        };
-        self.collab_mint_invite(&realm, &realm_key, &seed, &profile, role, ttl_ms)
+        self.collab = Some(CollabRuntime::new(craft_collab::CollabSession::join(doc, name, transport)));
     }
 
     /// Joins `doc` through an invite: presents its open token until the host
@@ -390,66 +100,168 @@ impl Session {
         token: Option<craft_collab::SignedGrant>,
         membership: Option<String>,
     ) {
-        let mut runtime = CollabRuntime::new(doc, name, transport);
-        runtime.token = token;
-        runtime.membership = membership;
-        runtime.awaiting_grant = true;
-        self.collab = Some(runtime);
+        self.collab = Some(CollabRuntime::new(craft_collab::CollabSession::join_requesting(doc, name, transport, token, membership)));
+    }
+
+    /// Whether this session is sharing its document.
+    pub fn collab_active(&self) -> bool {
+        self.collab.is_some()
+    }
+
+    /// Turns on access control for this document: only the host and live
+    /// grant holders act. Without it the session is open (spike mode).
+    pub fn collab_set_access(&mut self, access: craft_collab::Access) {
+        if let Some(c) = self.shared_mut() {
+            c.set_access(access);
+        }
+    }
+
+    /// Installs the host's signing side: with it, this session answers join
+    /// requests with grants.
+    pub fn collab_set_issuer(&mut self, issuer: Box<dyn craft_collab::GrantIssuer>) {
+        if let Some(c) = self.shared_mut() {
+            c.set_issuer(issuer);
+        }
+    }
+
+    /// Whether the host admits a valid token without asking (the UI leaves
+    /// this off and approves from `collab_pending`).
+    pub fn collab_set_auto_approve(&mut self, on: bool) {
+        if let Some(c) = self.shared_mut() {
+            c.set_auto_approve(on);
+        }
+    }
+
+    /// Remembers the mesh coordinates this host shares in, so the UI can
+    /// mint an invite with one call.
+    pub fn collab_set_share_context(&mut self, realm: &str, realm_key: &str, seed: &str, profile: &str) {
+        if let Some(c) = self.shared_mut() {
+            c.set_share_context(craft_collab::ShareContext {
+                realm: realm.to_string(),
+                realm_key: realm_key.to_string(),
+                seed: seed.to_string(),
+                profile: profile.to_string(),
+            });
+        }
+    }
+
+    /// The holders of this document (the UI's People list), sorted.
+    pub fn collab_holders(&self) -> Vec<String> {
+        self.shared().map(craft_collab::CollabSession::holders).unwrap_or_default()
+    }
+
+    /// Names the file where installed grants persist (the app's choice),
+    /// and loads it: a restarted host relearns its holders and a restarted
+    /// holder its own grant. Malformed or unverifiable entries are skipped;
+    /// persistence never takes the collaboration down.
+    pub fn collab_set_grants_path(&mut self, path: &str) {
+        if let Some(c) = self.shared_mut() {
+            c.set_grants_store(Box::new(AppFile(path.to_string())));
+        }
+    }
+
+    /// Names the file where this person's contacts persist (the app's
+    /// choice), and loads it: a restarted session keeps knowing the people
+    /// it met. Malformed entries are skipped; persistence never takes the
+    /// collaboration down.
+    pub fn collab_set_contacts_path(&mut self, path: &str) {
+        if let Some(c) = self.shared_mut() {
+            c.set_contacts_store(Box::new(AppFile(path.to_string())));
+        }
+    }
+
+    /// Remembers one sighting of a person: their node id, the name they gave
+    /// (empty keeps what we have) and the realm, when known.
+    pub fn collab_note_contact(&mut self, node: &str, name: &str, realm: Option<&str>) {
+        if let Some(c) = self.shared_mut() {
+            c.note_contact(node, name, realm);
+        }
+    }
+
+    /// The people this device has met, most recently seen first.
+    pub fn collab_contacts(&self) -> Vec<craft_collab::Contact> {
+        self.shared().map(craft_collab::CollabSession::contacts).unwrap_or_default()
+    }
+
+    /// Forgets a person; true when one was known.
+    pub fn collab_forget_contact(&mut self, node: &str) -> bool {
+        self.shared_mut().is_some_and(|c| c.forget_contact(node))
+    }
+
+    /// Stores the realm membership status the app read for this session's
+    /// identity (`collab.realm` reports it back).
+    pub fn collab_set_realm(&mut self, status: serde_json::Value) {
+        self.realm = Some(status);
+    }
+
+    /// The realm membership status, or a bare not-signed-in answer.
+    pub fn collab_realm(&self) -> serde_json::Value {
+        self.realm.clone().unwrap_or_else(|| serde_json::json!({"signedIn": false}))
+    }
+
+    /// The host's own realm, when it is signed in to one: what an invite
+    /// shows beside its name.
+    fn host_realm(&self) -> Option<String> {
+        self.realm.as_ref().filter(|r| r["signedIn"] == true).and_then(|r| r["realm"].as_str()).map(str::to_string)
+    }
+
+    /// Whether this session can mint invites (it is the host and knows its
+    /// mesh coordinates).
+    pub fn collab_can_invite(&self) -> bool {
+        self.shared().is_some_and(craft_collab::CollabSession::can_invite)
+    }
+
+    /// Mints an invite for one person from the remembered share context:
+    /// the token names their node id, and only that node is admitted.
+    pub fn collab_invite_for_from_context(
+        &mut self,
+        holder: &str,
+        invitee_name: &str,
+        role: craft_collab::Role,
+        ttl_ms: u64,
+    ) -> Result<String, String> {
+        let host_realm = self.host_realm();
+        let Some(c) = self.shared() else { return Err("not collaborating".into()) };
+        c.mint_invite_for(None, host_realm.as_deref(), holder, invitee_name, role, ttl_ms)
+    }
+
+    /// Mints an invite from the remembered share context (the UI's Copy
+    /// invite): `role` and `ttl_ms` as in `collab_mint_invite`.
+    pub fn collab_invite_from_context(&mut self, role: craft_collab::Role, ttl_ms: u64) -> Result<String, String> {
+        let host_realm = self.host_realm();
+        let Some(c) = self.shared() else { return Err("not collaborating".into()) };
+        c.mint_invite(None, host_realm.as_deref(), role, ttl_ms)
     }
 
     /// The host shares this document with a realm: members presenting a live
     /// membership UCAN of that realm are admitted with the verifier's role,
     /// and the grant issued on one is capped at the membership's own end.
     pub fn collab_set_member_verifier(&mut self, verifier: Box<dyn craft_collab::MembershipVerifier>) {
-        if let Some(c) = self.collab.as_mut() {
-            c.member_verifier = Some(verifier);
+        if let Some(c) = self.shared_mut() {
+            c.set_member_verifier(verifier);
         }
     }
 
     /// Whether this host shares with a realm.
     pub fn collab_shares_with_realm(&self) -> bool {
-        matches!(&self.collab, Some(c) if c.member_verifier.is_some())
+        self.shared().is_some_and(craft_collab::CollabSession::shares_with_realm)
     }
 
     /// Join requests awaiting the host's yes: (node id, display name).
     pub fn collab_pending(&self) -> Vec<(String, String)> {
-        self.collab.as_ref().map(|c| c.pending.iter().map(|(node, (name, _, _, _))| (node.clone(), name.clone())).collect()).unwrap_or_default()
+        self.shared().map(craft_collab::CollabSession::pending).unwrap_or_default()
     }
 
     /// The host approves a pending joiner: mints the grant from its token's
     /// role (capped by the membership's end when the admission was one),
     /// broadcasts it and installs it.
     pub fn collab_approve(&mut self, node: &str) -> Result<(), String> {
-        let (role, ends_ms) = {
-            let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
-            let Some((_, _, role, ends_ms)) = c.pending.get(node) else {
-                return Err("no such pending joiner".into());
-            };
-            (*role, *ends_ms)
-        };
-        if self.collab.as_ref().and_then(|c| c.issuer.as_ref()).is_none() {
-            return Err("this session is not the host".into());
-        }
-        self.collab_issue_grant(node, role, now_ms(), ends_ms);
-        Ok(())
+        self.shared_mut().ok_or_else(|| "not collaborating".to_string())?.approve(node)
     }
 
     /// The host revokes a holder: signs it, broadcasts it, applies it.
     pub fn collab_revoke(&mut self, node: &str) -> Result<(), String> {
-        let now = now_ms();
-        let signed = {
-            let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
-            let Some(issuer) = c.issuer.as_ref() else { return Err("this session is not the host".into()) };
-            issuer.revoke(&c.doc, node, now)?
-        };
-        if let Some(c) = self.collab.as_mut() {
-            c.send(craft_collab::Kind::Revoked { revocation: signed.clone() });
-            if let Some(access) = c.access.as_mut() {
-                let _ = access.revoke(&signed, now);
-            }
-            c.pending.remove(node);
-        }
-        Ok(())
+        self.shared_mut().ok_or_else(|| "not collaborating".to_string())?.revoke(node)
     }
 
     /// Mints this host's invite for the document: `realm`, `realm_key` and
@@ -464,21 +276,20 @@ impl Session {
         role: craft_collab::Role,
         ttl_ms: u64,
     ) -> Result<String, String> {
-        self.collab_mint_invite_kind(realm, realm_key, seed, profile, role, ttl_ms, false, None)
+        let share = share_context(realm, realm_key, seed, profile);
+        let host_realm = self.host_realm();
+        let Some(c) = self.shared() else { return Err("not collaborating".into()) };
+        c.mint_invite(Some(&share), host_realm.as_deref(), role, ttl_ms)
     }
 
     /// Mints a realm invite: no open token, and members of the host's realm
     /// are admitted with the verifier's role. The host must share with a
     /// realm (`collab_set_member_verifier`).
     pub fn collab_mint_realm_invite(&mut self, realm: &str, realm_key: &str, seed: &str, profile: &str, ttl_ms: u64) -> Result<String, String> {
-        let role = {
-            let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
-            let Some(verifier) = c.member_verifier.as_ref() else {
-                return Err("this document is not shared with a realm".into());
-            };
-            verifier.role()
-        };
-        self.collab_mint_invite_kind(realm, realm_key, seed, profile, role, ttl_ms, true, None)
+        let share = share_context(realm, realm_key, seed, profile);
+        let host_realm = self.host_realm();
+        let Some(c) = self.shared() else { return Err("not collaborating".into()) };
+        c.mint_realm_invite(Some(&share), host_realm.as_deref(), ttl_ms)
     }
 
     /// Mints an invite for one person: the token's holder is that person's
@@ -496,74 +307,10 @@ impl Session {
         role: craft_collab::Role,
         ttl_ms: u64,
     ) -> Result<String, String> {
-        let holder = holder.trim().to_ascii_lowercase();
-        if holder.len() != 64 || !holder.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err("an invitee node id is 64 hex characters".into());
-        }
-        self.collab_mint_invite_kind(realm, realm_key, seed, profile, role, ttl_ms, false, Some((&holder, invitee_name)))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn collab_mint_invite_kind(
-        &mut self,
-        realm: &str,
-        realm_key: &str,
-        seed: &str,
-        profile: &str,
-        role: craft_collab::Role,
-        ttl_ms: u64,
-        realm_members: bool,
-        holder: Option<(&str, &str)>,
-    ) -> Result<String, String> {
-        let now = now_ms();
-        // The host's own realm, when it is signed in to one: what the joiner
-        // shows beside its name.
-        let host_realm = self.realm.as_ref().filter(|r| r["signedIn"] == true).and_then(|r| r["realm"].as_str()).map(str::to_string);
-        let (doc, host, host_key, host_name, token, member_realm) = {
-            let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
-            let Some(issuer) = c.issuer.as_ref() else { return Err("this session is not the host".into()) };
-            // A realm invite names the realm whose members it admits: the
-            // verifier's, which may be another realm than the host's own.
-            let member_realm = match (realm_members, c.member_verifier.as_ref()) {
-                (true, Some(verifier)) => Some(verifier.realm().to_string()),
-                (true, None) => return Err("this document is not shared with a realm".into()),
-                (false, _) => None,
-            };
-            let token = match holder {
-                // An invite for one person: the token is pre-named for them.
-                Some((node, _name)) => issuer.issue(&c.doc, node, role, ttl_ms, now)?,
-                None => issuer.open_token(&c.doc, role, ttl_ms, now)?,
-            };
-            (c.doc.clone(), issuer.node_id(), issuer.carried_key(), c.name.clone(), token, member_realm)
-        };
-        let mut invite = craft_collab::Invite {
-            v: craft_collab::INVITE_VERSION,
-            doc,
-            host,
-            host_key: hex_bytes(&host_key),
-            host_name,
-            realm: realm.to_string(),
-            realm_key: realm_key.to_string(),
-            profile: profile.to_string(),
-            seed: seed.to_string(),
-            issued_ms: now,
-            expires_ms: now.saturating_add(ttl_ms),
-            token: if realm_members { None } else { Some(token) },
-            member_role: if realm_members { Some(role) } else { None },
-            member_realm,
-            host_realm,
-            invitee: holder.map(|(node, _)| node.to_string()),
-            invitee_name: holder.map(|(_, name)| name.to_string()),
-            signature: Vec::new(),
-        };
-        // The envelope is signed by the host identity: the joiner can verify
-        // exactly who invited it, and that no field was swapped en route.
-        invite.signature = {
-            let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
-            let Some(issuer) = c.issuer.as_ref() else { return Err("this session is not the host".into()) };
-            issuer.sign(&invite.signed_bytes()?)?
-        };
-        invite.encode()
+        let share = share_context(realm, realm_key, seed, profile);
+        let host_realm = self.host_realm();
+        let Some(c) = self.shared() else { return Err("not collaborating".into()) };
+        c.mint_invite_for(Some(&share), host_realm.as_deref(), holder, invitee_name, role, ttl_ms)
     }
 
     /// The exact edit a local command is about to make, when it is known
@@ -602,16 +349,16 @@ impl Session {
         };
         let mut updates = Vec::new();
         if let Some(c) = self.collab.as_mut() {
-            if let Some(u) = c.texts.local_edit_exact(&para, index, remove, &insert) {
+            if let Some(u) = c.shared.texts_mut().local_edit_exact(&para, index, remove, &insert) {
                 updates.push((u, props.clone()));
             }
-            if let Some(u) = c.texts.sync(&para, &doc_text) {
+            if let Some(u) = c.shared.texts_mut().sync(&para, &doc_text) {
                 updates.push((u, None));
             }
         }
         for (update, props) in updates {
             if let Some(c) = self.collab.as_mut() {
-                c.send(craft_collab::Kind::TextEdit { para: para.clone(), update, props });
+                c.shared.send_text(para.clone(), update, props);
             }
         }
     }
@@ -657,13 +404,13 @@ impl Session {
     pub(crate) fn collab_apply_style(&mut self, pid: u64, index: u32, len: u32, bold: bool) {
         let para = pid.to_string();
         let update = match self.collab.as_mut() {
-            Some(c) => c.texts.local_bold(&para, index, len, bold),
+            Some(c) => c.shared.texts_mut().local_bold(&para, index, len, bold),
             None => return,
         };
         if let Some(update) = update
             && let Some(c) = self.collab.as_mut()
         {
-            c.send(craft_collab::Kind::TextEdit { para: para.clone(), update, props: None });
+            c.shared.send_text(para.clone(), update, None);
         }
         self.collab_sync_bold(pid);
     }
@@ -672,7 +419,7 @@ impl Session {
     /// derivation every replica shares, so runs cover the same characters.
     pub(crate) fn collab_sync_bold(&mut self, pid: u64) {
         let spans = match self.collab.as_ref() {
-            Some(c) => c.texts.bold_spans(&pid.to_string()),
+            Some(c) => c.shared.texts().bold_spans(&pid.to_string()),
             None => return,
         };
         if self.doc.set_paragraph_bold_by_pid(pid, &spans) {
@@ -682,8 +429,8 @@ impl Session {
 
     /// Queues a captured command for the peers.
     pub(crate) fn collab_send_command(&mut self, id: String, params: Vec<u8>, anchor: Option<String>) {
-        if let Some(c) = self.collab.as_mut() {
-            c.send(craft_collab::Kind::Command { id, params, anchor });
+        if let Some(c) = self.shared_mut() {
+            c.send_command(id, params, anchor);
         }
     }
 
@@ -699,73 +446,33 @@ impl Session {
     /// Applies what the peers sent and shares this author's cursor. The app
     /// calls this once per frame while collaborating.
     pub fn collab_tick(&mut self) {
-        let msgs = match self.collab.as_mut() {
-            Some(c) => c.poll(),
+        let events = match self.shared_mut() {
+            Some(c) => c.tick(),
             None => return,
         };
-        for msg in msgs {
-            self.collab_receive(msg);
+        for event in events {
+            self.collab_apply(event);
         }
-        // A joiner asks for admission until its grant arrives.
-        let now = now_ms();
-        if let Some(c) = self.collab.as_mut()
-            && c.awaiting_grant
-            && c.grant_attempts < MAX_GRANT_ATTEMPTS
-            && (c.grant_attempts == 0 || now.saturating_sub(c.last_grant_ms) >= 2_000)
-            && (c.token.is_some() || c.membership.is_some())
-        {
-            c.grant_attempts += 1;
-            c.last_grant_ms = now;
-            let (token, membership) = (c.token.clone(), c.membership.clone());
-            c.send(craft_collab::Kind::JoinRequest { token, name: c.name.clone(), membership });
+        let cursor = self.cursor_json();
+        if let Some(c) = self.shared_mut() {
+            c.share_cursor(cursor);
         }
-
-        // A joiner asks for the shared document until it hears one back (a
-        // publication can be lost; the request is cheap and idempotent).
-        let now = now_ms();
-        if let Some(c) = self.collab.as_mut()
-            && c.awaiting_snapshot
-            && c.snapshot_attempts < 5
-            && (c.snapshot_attempts == 0 || now.saturating_sub(c.last_snapshot_ms) >= 2_000)
-        {
-            c.snapshot_attempts += 1;
-            c.last_snapshot_ms = now;
-            c.send(craft_collab::Kind::SnapshotRequest {});
-        }
-        self.collab_send_cursor();
     }
 
-    fn collab_receive(&mut self, msg: craft_collab::Message) {
-        // A join request is the door: the host judges it by its token, not
-        // by a holder lookup (the joiner holds no grant yet).
-        if let craft_collab::Kind::JoinRequest { token, name, membership } = &msg.kind {
-            self.collab_on_join_request(&msg.author, token, membership, name);
-            return;
-        }
-        // Access control, on every message: the host and live grant holders
-        // act; strangers, expired grants and role violations are dropped.
-        if let Some(admission) = self.collab.as_ref().and_then(|c| c.access.as_ref()).map(|a| a.admits(&msg.author, &msg.kind, now_ms()))
-            && !admission.is_admitted()
-        {
-            if let Some(c) = self.collab.as_mut() {
-                c.unauthorized += 1;
-            }
-            return;
-        }
-        match msg.kind {
-            craft_collab::Kind::TextEdit { para, update, props } => {
-                self.collab_record_latency(&msg.author, msg.sent_at_ms);
+    /// Applies one peer event the seam let through its door.
+    fn collab_apply(&mut self, event: craft_collab::Inbound) {
+        match event {
+            craft_collab::Inbound::Text { para, update, props, .. } => {
                 let carried_props: Option<wordcraft_doc::CharProps> = props.as_deref().and_then(|b| serde_json::from_slice(b).ok());
                 self.collab_apply_remote_text(&para, &update, carried_props.as_ref());
             }
-            craft_collab::Kind::Command { id, params, anchor } => {
-                self.collab_record_latency(&msg.author, msg.sent_at_ms);
+            craft_collab::Inbound::Command { author, id, params, anchor } => {
                 // A holder may replay only the commands the local capture
                 // would ever send; anything else (file, tools, UI, undo) is
                 // refused on receive, whoever the author is.
                 if !replayable_command(&id) {
-                    if let Some(c) = self.collab.as_mut() {
-                        c.unauthorized += 1;
+                    if let Some(c) = self.shared_mut() {
+                        c.note_refused();
                     }
                     return;
                 }
@@ -777,176 +484,33 @@ impl Session {
                     self.sel = sel;
                 }
                 let parsed: Value = serde_json::from_slice(&params).unwrap_or(Value::Null);
-                let result = self.run_with_origin(&id, &parsed, craft_collab::Origin::Remote { author: msg.author.clone() });
+                let result = self.run_with_origin(&id, &parsed, craft_collab::Origin::Remote { author });
                 self.sel = previous;
                 self.clamp_selection();
                 if let Err(e) = result {
-                    if let Some(c) = self.collab.as_mut() {
-                        c.remote_errors += 1;
+                    if let Some(c) = self.shared_mut() {
+                        c.note_remote_error();
                     }
                     self.status = format!("remote {id}: {e}");
                 }
             }
-            craft_collab::Kind::CursorMoved { position, name } => {
-                let name = name.unwrap_or_else(|| msg.author.chars().take(6).collect());
-                if let Some(c) = self.collab.as_mut() {
-                    c.presence.set(&msg.author, &name, position);
-                }
-            }
-            craft_collab::Kind::SnapshotRequest {} => {
-                // Only a session that holds the document answers: a joiner
-                // still waiting for its own catch-up has nothing to give
-                // (and its empty document would win the race against the
-                // host's real snapshot).
-                if matches!(&self.collab, Some(c) if !c.has_snapshot) {
-                    return;
-                }
+            craft_collab::Inbound::SnapshotWanted => {
                 let data = craft_collab::DocAdapter::snapshot(self);
-                let crdt = self.collab.as_ref().map(|c| c.texts.full_update()).unwrap_or_default();
-                if let Some(c) = self.collab.as_mut() {
-                    c.send(craft_collab::Kind::Snapshot { data, crdt });
+                if let Some(c) = self.shared_mut() {
+                    c.answer_snapshot(data);
                 }
             }
-            craft_collab::Kind::Snapshot { data, crdt } => {
-                let joining = matches!(&self.collab, Some(c) if c.awaiting_snapshot);
-                if joining && craft_collab::DocAdapter::load_snapshot(self, &data).is_ok() {
+            craft_collab::Inbound::Snapshot { data, crdt } => {
+                let joining = self.shared().is_some_and(craft_collab::CollabSession::awaiting_snapshot);
+                if joining
+                    && craft_collab::DocAdapter::load_snapshot(self, &data).is_ok()
+                    && let Some(c) = self.shared_mut()
+                {
                     // Seed the CRDT too, or post-join merges would not align
                     // with the peers' item history.
-                    if let Some(c) = self.collab.as_mut() {
-                        let _ = c.texts.apply_doc_update(&crdt);
-                        c.awaiting_snapshot = false;
-                        c.has_snapshot = true;
-                    }
+                    c.snapshot_loaded(&crdt);
                 }
             }
-            craft_collab::Kind::GrantIssued { grant } => {
-                // Every replica installs it (the verifier decides); a joiner
-                // this grant names is admitted and may now ask for the doc.
-                let now = now_ms();
-                if let Some(c) = self.collab.as_mut() {
-                    if let Some(access) = c.access.as_mut() {
-                        let _ = access.install(&grant, now);
-                    }
-                    if c.awaiting_grant && grant.grant.holder == c.author {
-                        c.awaiting_grant = false;
-                        c.awaiting_snapshot = true;
-                        c.snapshot_attempts = 0;
-                    }
-                }
-                self.collab_save_grants();
-            }
-            craft_collab::Kind::Revoked { revocation } => {
-                let now = now_ms();
-                if let Some(c) = self.collab.as_mut()
-                    && let Some(access) = c.access.as_mut()
-                {
-                    let _ = access.revoke(&revocation, now);
-                }
-                self.collab_save_grants();
-            }
-            // Handled before the access check: it is the door itself.
-            craft_collab::Kind::JoinRequest { .. } => {}
-        }
-    }
-
-    /// The host judges a join request by its token: a valid open token gets
-    /// a concrete grant (auto-approved when configured, else queued for the
-    /// host's yes); an invalid one is refused and counted.
-    fn collab_on_join_request(&mut self, author: &str, token: &Option<craft_collab::SignedGrant>, membership: &Option<String>, name: &str) {
-        let now = now_ms();
-        let mut admitted: Option<(craft_collab::Role, Option<u64>)> = None;
-        {
-            let Some(c) = self.collab.as_mut() else { return };
-            if c.issuer.is_none() {
-                return; // not the host: only the host admits
-            }
-            // The invite's own token, when one was presented.
-            if let Some(token) = token
-                && let Some(access) = c.access.as_ref()
-                && let Ok(checked) = access.check_token_for(token, author, now)
-            {
-                admitted = Some((checked.role, None));
-            }
-            // A realm membership: the verifier holds the realm's key and the
-            // host's role mapping; the audience check pins the caller, and
-            // the membership's own end caps any grant issued on it.
-            if admitted.is_none()
-                && let (Some(verifier), Some(ucan)) = (c.member_verifier.as_ref(), membership.as_ref())
-                && let Ok(ends_ms) = verifier.verify_member(ucan, author, now)
-            {
-                admitted = Some((verifier.role(), Some(ends_ms)));
-            }
-        }
-        let Some((role, ends_ms)) = admitted else {
-            // A stranger at the door: refused and counted (the old code
-            // returned silently; the count is the honest signal).
-            if let Some(c) = self.collab.as_mut()
-                && c.issuer.is_some()
-            {
-                c.unauthorized += 1;
-            }
-            return;
-        };
-        // A membership that has already ended is not an admission: there is
-        // nothing to grant, so the door refuses like any other stranger.
-        if ends_ms.is_some_and(|ends| ends <= now) {
-            if let Some(c) = self.collab.as_mut()
-                && c.issuer.is_some()
-            {
-                c.unauthorized += 1;
-            }
-            return;
-        }
-        // The person at the door is someone we have met: remember them. A
-        // stranger with a bad token never reaches this point.
-        self.collab_note_contact(author, name, None);
-        let auto = matches!(&self.collab, Some(c) if c.auto_approve);
-        if auto {
-            self.collab_issue_grant(author, role, now, ends_ms);
-        } else if let Some(c) = self.collab.as_mut() {
-            c.pending.insert(author.to_string(), (name.to_string(), now, role, ends_ms));
-        }
-    }
-
-    /// Mints a grant for `holder` as the host, broadcasts it and installs it.
-    /// `ends_ms` is the membership's own end when the admission was one: the
-    /// grant never outlives it, so a revoked or lapsed membership takes the
-    /// document access down with it.
-    fn collab_issue_grant(&mut self, holder: &str, role: craft_collab::Role, now: u64, ends_ms: Option<u64>) {
-        let ttl_ms = match ends_ms {
-            Some(ends) => GRANT_TTL_MS.min(ends.saturating_sub(now)),
-            None => GRANT_TTL_MS,
-        };
-        if ttl_ms == 0 {
-            return; // nothing left of the membership: nothing to grant
-        }
-        let issued = {
-            let Some(c) = self.collab.as_ref() else { return };
-            let Some(issuer) = c.issuer.as_ref() else { return };
-            match issuer.issue(&c.doc, holder, role, ttl_ms, now) {
-                Ok(signed) => signed,
-                Err(_) => return,
-            }
-        };
-        if let Some(c) = self.collab.as_mut() {
-            c.send(craft_collab::Kind::GrantIssued { grant: issued.clone() });
-            if let Some(access) = c.access.as_mut() {
-                let _ = access.install(&issued, now);
-            }
-            c.pending.remove(holder);
-        }
-        self.collab_save_grants();
-    }
-
-    /// Records one received-edit latency sample (skipped when the sender had
-    /// no clock).
-    fn collab_record_latency(&mut self, author: &str, sent_at_ms: u64) {
-        if sent_at_ms == 0 {
-            return;
-        }
-        let now = now_ms();
-        if let Some(c) = self.collab.as_mut() {
-            c.latency.entry(author.to_string()).or_default().push(now.saturating_sub(sent_at_ms));
         }
     }
 
@@ -954,64 +518,7 @@ impl Session {
     /// latency (p50/p95) and the count of remote commands that failed to
     /// apply (a divergence signal).
     pub fn collab_stats(&self) -> Value {
-        let Some(c) = self.collab.as_ref() else {
-            return json!({"active": false});
-        };
-        let peers: Vec<Value> = c
-            .presence
-            .peers()
-            .map(|p| {
-                json!({
-                    "name": p.name,
-                    "author": short(&p.author),
-                    "hasCursor": p.position.is_some(),
-                })
-            })
-            .collect();
-        let mut latency: Vec<Value> = c
-            .latency
-            .iter()
-            .map(|(author, samples)| {
-                let mut v = samples.clone();
-                v.sort_unstable();
-                json!({
-                    "author": short(author),
-                    "n": v.len(),
-                    "p50Ms": percentile(&v, 50),
-                    "p95Ms": percentile(&v, 95),
-                })
-            })
-            .collect();
-        latency.sort_by(|a, b| a["author"].as_str().cmp(&b["author"].as_str()));
-        json!({
-            "active": true,
-            "doc": c.doc,
-            "author": short(&c.author),
-            "authorId": c.author,
-            "joined": !c.awaiting_snapshot,
-            "seq": c.seq,
-            "peers": peers,
-            "latency": latency,
-            "remoteErrors": c.remote_errors,
-            "unauthorized": c.unauthorized,
-            "access": c.access.is_some(),
-            "awaitingGrant": c.awaiting_grant,
-            "realmShare": c.member_verifier.is_some(),
-            "pending": c.pending.iter().map(|(node, (name, _, _, _))| json!({"node": short(node), "name": name})).collect::<Vec<_>>(),
-            "contacts": c.contacts.len(),
-        })
-    }
-
-    /// Shares this author's cursor when it moved since the last share.
-    fn collab_send_cursor(&mut self) {
-        let cursor = self.cursor_json();
-        let Some(c) = self.collab.as_mut() else { return };
-        if c.last_cursor == cursor {
-            return;
-        }
-        let name = c.name.clone();
-        c.last_cursor = cursor.clone();
-        c.send(craft_collab::Kind::CursorMoved { position: cursor, name: Some(name) });
+        self.shared().map(craft_collab::CollabSession::stats).unwrap_or_else(|| json!({"active": false}))
     }
 
     /// This author's cursor as the app encodes it: paragraph id + offset.
@@ -1027,13 +534,8 @@ impl Session {
     /// Undoes this author's most recent local edit and shares the change.
     /// False when there is nothing of this author's to undo.
     pub(crate) fn collab_undo(&mut self) -> bool {
-        let undone = match self.collab.as_mut() {
-            Some(c) => c.texts.undo_local(),
-            None => return false,
-        };
-        let Some(update) = undone else { return false };
-        if let Some(c) = self.collab.as_mut() {
-            c.send(craft_collab::Kind::TextEdit { para: String::new(), update, props: None });
+        if self.shared_mut().and_then(craft_collab::CollabSession::undo_local).is_none() {
+            return false;
         }
         // The undo may have touched any paragraph (a split, a join, typing
         // anywhere): the document follows the shared text.
@@ -1045,12 +547,16 @@ impl Session {
 
     /// The peers to draw, their cursors resolved to positions where known.
     pub fn collab_peers(&self) -> Vec<PeerView> {
-        let Some(c) = self.collab.as_ref() else { return Vec::new() };
-        c.presence
-            .peers()
+        let Some(c) = self.shared() else { return Vec::new() };
+        c.peers()
             .map(|p| PeerView { name: p.name.clone(), color: p.color, pos: p.position.as_deref().and_then(|s| cursor_pos(&self.doc, s)) })
             .collect()
     }
+}
+
+/// The mesh coordinates an invite carries, verbatim.
+fn share_context(realm: &str, realm_key: &str, seed: &str, profile: &str) -> craft_collab::ShareContext {
+    craft_collab::ShareContext { realm: realm.to_string(), realm_key: realm_key.to_string(), seed: seed.to_string(), profile: profile.to_string() }
 }
 
 /// The document's top-level body paragraphs as the shared text holds them:
@@ -1093,7 +599,7 @@ impl Session {
         let ends = [self.body_position(&self.sel.anchor), self.body_position(&self.sel.focus)];
         let positions: Vec<(String, u32)> = ends.iter().flatten().cloned().collect();
         let carried = match self.collab.as_mut() {
-            Some(c) => c.texts.apply_update_carrying(update, &positions),
+            Some(c) => c.shared.texts_mut().apply_update_carrying(update, &positions),
             None => return,
         };
         let Ok(carried) = carried else { return };
@@ -1129,7 +635,7 @@ impl Session {
     /// the formatting it carried.
     pub(crate) fn collab_reconcile_body(&mut self, props_for: Option<&str>, props: Option<&wordcraft_doc::CharProps>) {
         let paras = match self.collab.as_ref() {
-            Some(c) => c.texts.body_paragraphs(),
+            Some(c) => c.shared.texts().body_paragraphs(),
             None => return,
         };
         if paras.is_empty() {
@@ -1250,10 +756,10 @@ impl Session {
         };
         for pid in pids {
             let Some(c) = self.collab.as_ref() else { return };
-            if c.texts.in_body(&pid.to_string()) {
+            if c.shared.texts().in_body(&pid.to_string()) {
                 continue;
             }
-            let text = c.texts.text(&pid.to_string());
+            let text = c.shared.texts().text(&pid.to_string());
             let current = self.doc.paragraph_by_pid(pid).and_then(|(s, p)| self.doc.para(s, &p).map(|q| q.text.clone()));
             if only.is_none() && text.is_empty() && current.as_deref().is_some_and(|t| !t.is_empty()) {
                 continue; // never shared: nothing to follow
@@ -1291,7 +797,7 @@ impl Session {
         let mut updates: Vec<(String, Vec<u8>)> = Vec::new();
         // Joins first, last to first, so each leader is still where it was.
         for id in old_ids.iter().rev().filter(|id| !new_ids.contains(id)) {
-            if let Some(u) = c.texts.local_join(id) {
+            if let Some(u) = c.shared.texts_mut().local_join(id) {
                 updates.push((id.to_string(), u));
             }
         }
@@ -1302,19 +808,19 @@ impl Session {
                 continue;
             }
             let Some(prev) = i.checked_sub(1).map(|j| &new[j]) else { continue };
-            let at = prev.text.len().min(c.texts.text(&prev.para).len()) as u32;
-            if let Some(u) = c.texts.local_split(&prev.para, at, &p.para, p.props.as_deref()) {
+            let at = prev.text.len().min(c.shared.texts_mut().text(&prev.para).len()) as u32;
+            if let Some(u) = c.shared.texts_mut().local_split(&prev.para, at, &p.para, p.props.as_deref()) {
                 updates.push((p.para.clone(), u));
             }
         }
         // Then every paragraph's text is the document's.
         for p in &new {
-            if let Some(u) = c.texts.sync(&p.para, &p.text) {
+            if let Some(u) = c.shared.texts_mut().sync(&p.para, &p.text) {
                 updates.push((p.para.clone(), u));
             }
         }
         for (para, update) in updates {
-            c.send(craft_collab::Kind::TextEdit { para, update, props: None });
+            c.shared.send_text(para, update, None);
         }
         self.collab_reconcile_body(None, None);
         true
@@ -1358,25 +864,6 @@ fn selection_from(doc: &Document, encoded: &str) -> Option<crate::Selection> {
         Some(Pos { story, path, off: off.min(len) })
     };
     Some(crate::Selection { anchor: end("anchor")?, focus: end("focus")? })
-}
-
-/// The first eight hex characters of an author id, for reports.
-pub(crate) fn short(author: &str) -> String {
-    author.chars().take(8).collect()
-}
-
-/// The hex form of bytes (keys, ids).
-fn hex_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// The p-th percentile of a sorted, non-empty sample list (nearest rank).
-fn percentile(sorted: &[u64], p: usize) -> u64 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    let idx = ((sorted.len() - 1) * p) / 100;
-    sorted[idx.min(sorted.len() - 1)]
 }
 
 impl craft_collab::DocAdapter for Session {
@@ -1423,21 +910,6 @@ pub(crate) fn shifted_off(off: usize, pre: usize, removed: usize, inserted: usiz
         off - removed + inserted
     } else {
         pre
-    }
-}
-
-/// Reads one of the app's own collaboration files (grants, contacts). They are the app's
-/// folders, not a command's, so automation roots don't apply ([`crate::file_access::unconfined`]).
-fn read_app_file(path: &str) -> Option<String> {
-    crate::file_access::unconfined(|| crate::io::read_file(path)).ok().and_then(|b| String::from_utf8(b).ok())
-}
-
-/// Writes one of the app's own collaboration files; a failed write never takes the
-/// collaboration down.
-fn write_app_file(path: &std::path::Path, bytes: &[u8]) {
-    let path = path.to_string_lossy();
-    if let Err(e) = crate::file_access::unconfined(|| crate::io::write_file(&path, bytes)) {
-        log::warn!("collab: {e}");
     }
 }
 

@@ -65,6 +65,7 @@ pub mod paste_picture;
 pub mod previews;
 pub mod print_page;
 pub mod read_aloud;
+pub mod qr;
 pub mod ribbon;
 pub mod scroll;
 pub mod system_clipboard;

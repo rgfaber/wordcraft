@@ -68,6 +68,9 @@ pub struct CollabRuntime {
     /// Join requests waiting for the host's yes: node id -> (name, at_ms,
     /// role, and the membership's own end when the admission was one).
     pending: std::collections::BTreeMap<String, (String, u64, craft_collab::Role, Option<u64>)>,
+    /// Body paragraphs a join took out, by id: an undo (or a peer's) can
+    /// bring one back, with its formatting.
+    graveyard: HashMap<u64, wordcraft_doc::Paragraph>,
     /// Whether the host admits a valid token without asking.
     auto_approve: bool,
     /// Whether this session holds the document: the origin (attach) does
@@ -119,6 +122,7 @@ impl CollabRuntime {
             grant_attempts: 0,
             last_grant_ms: 0,
             pending: std::collections::BTreeMap::new(),
+            graveyard: HashMap::new(),
             auto_approve: false,
             has_snapshot: false,
             share: None,
@@ -184,8 +188,10 @@ impl Session {
     /// Starts collaborating on `doc` as `name`, over `transport`.
     pub fn collab_attach(&mut self, doc: &str, name: &str, transport: Box<dyn craft_collab::Transport>) {
         let mut runtime = CollabRuntime::new(doc, name, transport);
-        // The origin starts with the document itself.
+        // The origin starts with the document itself: its body seeds the
+        // shared text (joiners receive it in the snapshot).
         runtime.has_snapshot = true;
+        runtime.texts.seed_body(&body_paragraphs_of(&self.doc));
         self.collab = Some(runtime);
     }
 
@@ -749,28 +755,8 @@ impl Session {
         match msg.kind {
             craft_collab::Kind::TextEdit { para, update, props } => {
                 self.collab_record_latency(&msg.author, msg.sent_at_ms);
-                let merged = match self.collab.as_mut() {
-                    Some(c) => c.texts.apply_update(&para, &update),
-                    None => return,
-                };
-                let Ok(merged) = merged else { return };
-                let Ok(pid) = para.parse::<u64>() else { return };
-                let carried: Option<wordcraft_doc::CharProps> = props.as_deref().and_then(|b| serde_json::from_slice(b).ok());
-                if let Some((story, path, pre, removed, inserted)) = self.doc.splice_paragraph_text(pid, &merged, carried.as_ref()) {
-                    // The local caret and selection follow the remote change
-                    // made before them, so the next local typing lands where
-                    // its author is, not inside the other person's text.
-                    for pos in [&mut self.sel.anchor, &mut self.sel.focus] {
-                        if pos.story == story && pos.path == path {
-                            pos.off = shifted_off(pos.off, pre, removed, inserted);
-                        }
-                    }
-                    self.touch();
-                    self.clamp_selection();
-                }
-                // The CRDT also carries the anchored formatting: derive
-                // runs from it, so every replica covers the same characters.
-                self.collab_sync_bold(pid);
+                let carried_props: Option<wordcraft_doc::CharProps> = props.as_deref().and_then(|b| serde_json::from_slice(b).ok());
+                self.collab_apply_remote_text(&para, &update, carried_props.as_ref());
             }
             craft_collab::Kind::Command { id, params, anchor } => {
                 self.collab_record_latency(&msg.author, msg.sent_at_ms);
@@ -1045,19 +1031,15 @@ impl Session {
             Some(c) => c.texts.undo_local(),
             None => return false,
         };
-        let Some((para, update, merged)) = undone else { return false };
+        let Some(update) = undone else { return false };
         if let Some(c) = self.collab.as_mut() {
-            c.send(craft_collab::Kind::TextEdit { para: para.clone(), update, props: None });
+            c.send(craft_collab::Kind::TextEdit { para: String::new(), update, props: None });
         }
-        if let Ok(pid) = para.parse::<u64>()
-            && self.doc.set_paragraph_text_by_pid(pid, &merged)
-        {
-            self.touch();
-            self.clamp_selection();
-        }
-        if let Ok(pid) = para.parse::<u64>() {
-            self.collab_sync_bold(pid);
-        }
+        // The undo may have touched any paragraph (a split, a join, typing
+        // anywhere): the document follows the shared text.
+        self.collab_reconcile_body(None, None);
+        self.collab_reconcile_outside(None);
+        self.clamp_selection();
         true
     }
 
@@ -1068,6 +1050,274 @@ impl Session {
             .peers()
             .map(|p| PeerView { name: p.name.clone(), color: p.color, pos: p.position.as_deref().and_then(|s| cursor_pos(&self.doc, s)) })
             .collect()
+    }
+}
+
+/// The document's top-level body paragraphs as the shared text holds them:
+/// id, text and paragraph properties.
+fn body_paragraphs_of(doc: &Document) -> Vec<craft_collab::BodyParagraph> {
+    doc.body
+        .iter()
+        .filter_map(|b| match &**b {
+            wordcraft_doc::Block::Para(p) => {
+                Some(craft_collab::BodyParagraph { para: p.pid.to_string(), text: p.text.clone(), props: serde_json::to_string(&p.props).ok() })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The top-level body blocks that are not paragraphs (tables and the like),
+/// in order: a structural capture only covers paragraphs, so a command that
+/// changes these keeps the replay path.
+fn other_blocks_of(doc: &Document) -> Vec<Arc<wordcraft_doc::Block>> {
+    doc.body.iter().filter(|b| !matches!(&***b, wordcraft_doc::Block::Para(_))).cloned().collect()
+}
+
+use std::sync::Arc;
+
+impl Session {
+    /// Where a position is, as the shared text names it: a top-level body
+    /// paragraph's id and the offset in it. `None` elsewhere (a table cell).
+    fn body_position(&self, pos: &Pos) -> Option<(String, u32)> {
+        if pos.story != wordcraft_doc::StoryRef::Body || pos.path.0.len() != 1 {
+            return None;
+        }
+        let para = self.doc.para_at(pos)?;
+        Some((para.pid.to_string(), pos.off as u32))
+    }
+
+    /// A peer's text update: applied with this author's caret carried across
+    /// it, then the document follows the shared text.
+    fn collab_apply_remote_text(&mut self, para: &str, update: &[u8], props: Option<&wordcraft_doc::CharProps>) {
+        let ends = [self.body_position(&self.sel.anchor), self.body_position(&self.sel.focus)];
+        let positions: Vec<(String, u32)> = ends.iter().flatten().cloned().collect();
+        let carried = match self.collab.as_mut() {
+            Some(c) => c.texts.apply_update_carrying(update, &positions),
+            None => return,
+        };
+        let Ok(carried) = carried else { return };
+        // Outside the body only when this document holds that paragraph in
+        // a table: a split's new paragraph or a join's vanished one is not
+        // in the body text by name, yet it is a body change.
+        let outside = para.parse::<u64>().ok().and_then(|pid| self.doc.paragraph_by_pid(pid)).is_some_and(|(_, path)| path.0.len() > 1);
+        let in_body = !outside;
+        if in_body {
+            self.collab_reconcile_body(Some(para), props);
+            // The caret's ends where the shared text carried them.
+            let mut carried = carried.into_iter();
+            for (end, was) in [&mut self.sel.anchor, &mut self.sel.focus].into_iter().zip(ends) {
+                if was.is_some()
+                    && let Some((pid, off)) = carried.next()
+                    && let Ok(pid) = pid.parse::<u64>()
+                    && let Some((story, path)) = self.doc.paragraph_by_pid(pid)
+                {
+                    *end = Pos { story, path, off: off as usize };
+                }
+            }
+        } else {
+            self.collab_reconcile_outside(Some(para));
+        }
+        self.clamp_selection();
+    }
+
+    /// Makes the document's top-level body paragraphs what the shared text
+    /// says: their order, which exist, and their text. A remote split takes
+    /// its tail (formatting included) from the paragraph it split; a remote
+    /// join appends the joined paragraph; anything else is set from the text.
+    /// `props_for` names the paragraph a peer's typed text went into, with
+    /// the formatting it carried.
+    pub(crate) fn collab_reconcile_body(&mut self, props_for: Option<&str>, props: Option<&wordcraft_doc::CharProps>) {
+        let paras = match self.collab.as_ref() {
+            Some(c) => c.texts.body_paragraphs(),
+            None => return,
+        };
+        if paras.is_empty() {
+            return;
+        }
+        let wanted: Vec<u64> = paras.iter().filter_map(|p| p.para.parse().ok()).collect();
+        let wanted_set: std::collections::HashSet<u64> = wanted.iter().copied().collect();
+        // The old body: paragraphs by id, in order, and the other blocks
+        // each paragraph is followed by.
+        let mut old_paras: HashMap<u64, wordcraft_doc::Paragraph> = HashMap::new();
+        let mut old_order: Vec<u64> = Vec::new();
+        let mut leading: Vec<Arc<wordcraft_doc::Block>> = Vec::new();
+        let mut trailing: HashMap<u64, Vec<Arc<wordcraft_doc::Block>>> = HashMap::new();
+        let mut last_kept: Option<u64> = None;
+        for b in &self.doc.body {
+            match &**b {
+                wordcraft_doc::Block::Para(p) => {
+                    old_paras.insert(p.pid, p.clone());
+                    old_order.push(p.pid);
+                    if wanted_set.contains(&p.pid) {
+                        last_kept = Some(p.pid);
+                    }
+                }
+                _ => match last_kept {
+                    Some(pid) => trailing.entry(pid).or_default().push(b.clone()),
+                    None => leading.push(b.clone()),
+                },
+            }
+        }
+        let shared: HashMap<u64, &craft_collab::BodyParagraph> = paras.iter().filter_map(|p| p.para.parse::<u64>().ok().map(|id| (id, p))).collect();
+        let mut blocks = leading;
+        let mut prev: Option<u64> = None;
+        for pid in &wanted {
+            let target = shared.get(pid).map(|p| p.text.as_str()).unwrap_or("");
+            let para = match old_paras.get(pid).cloned() {
+                Some(mut p) => {
+                    // A join: the removed paragraphs right after it in the old
+                    // order, appended, make the shared text.
+                    let at = old_order.iter().position(|x| x == pid).unwrap_or(0);
+                    let joined: Vec<u64> = old_order[at + 1..].iter().copied().take_while(|x| !wanted_set.contains(x)).collect();
+                    let joined_text: String = joined.iter().filter_map(|x| old_paras.get(x)).map(|q| q.text.as_str()).collect();
+                    if !joined.is_empty() && format!("{}{}", p.text, joined_text) == target {
+                        for x in &joined {
+                            if let Some(q) = old_paras.get(x) {
+                                p.append(q.clone());
+                            }
+                        }
+                    } else if target.len() < p.text.len() && p.text.starts_with(target) {
+                        // A split: the tail went to the next paragraph.
+                        let _ = p.split_off(target.len());
+                    }
+                    p
+                }
+                None => {
+                    // New here: a peer's split takes its tail from the paragraph
+                    // it split, formatting included; a paragraph an undo brings
+                    // back comes out of the graveyard; anything else is new.
+                    let from_split = prev.and_then(|q| old_paras.get(&q)).and_then(|q| {
+                        let head = shared.get(&q.pid).map(|s| s.text.as_str()).unwrap_or("");
+                        (q.text.len() >= head.len() && q.text.starts_with(head) && &q.text[head.len()..] == target)
+                            .then(|| q.clone().split_off(head.len()).ok())
+                            .flatten()
+                    });
+                    let restored = self.collab.as_mut().and_then(|c| c.graveyard.remove(pid));
+                    let mut p = from_split.or(restored).unwrap_or_default();
+                    if let Some(props) = shared.get(pid).and_then(|s| s.props.as_deref()).and_then(|j| serde_json::from_str(j).ok()) {
+                        p.props = props;
+                    }
+                    p
+                }
+            };
+            let mut para = para;
+            para.pid = *pid;
+            blocks.push(Arc::new(wordcraft_doc::Block::Para(para)));
+            if let Some(after) = trailing.remove(pid) {
+                blocks.extend(after);
+            }
+            prev = Some(*pid);
+        }
+        // Paragraphs the shared text no longer holds go to the graveyard.
+        if let Some(c) = self.collab.as_mut() {
+            for pid in old_order.iter().filter(|x| !wanted_set.contains(x)) {
+                if let Some(p) = old_paras.get(pid) {
+                    c.graveyard.insert(*pid, p.clone());
+                }
+            }
+        }
+        let changed = blocks.len() != self.doc.body.len() || blocks.iter().zip(&self.doc.body).any(|(a, b)| a != b);
+        if changed {
+            self.doc.body = blocks;
+            self.doc.ensure_nonempty();
+            self.touch();
+        }
+        // Then every paragraph's text is the shared text's.
+        for p in &paras {
+            let Ok(pid) = p.para.parse::<u64>() else { continue };
+            let carried = if props_for == Some(p.para.as_str()) { props } else { None };
+            if self.doc.splice_paragraph_text(pid, &p.text, carried).is_some_and(|(_, _, _, r, i)| r + i > 0) {
+                self.touch();
+            }
+            self.collab_sync_bold(pid);
+        }
+    }
+
+    /// Paragraphs outside the body (table cells): each follows its own
+    /// shared text. `only` names the one a peer's edit touched; `None` checks
+    /// them all (after an undo).
+    pub(crate) fn collab_reconcile_outside(&mut self, only: Option<&str>) {
+        let pids: Vec<u64> = match only {
+            Some(para) => para.parse().into_iter().collect(),
+            None => self
+                .doc
+                .para_paths(wordcraft_doc::StoryRef::Body)
+                .iter()
+                .filter(|p| p.0.len() > 1)
+                .filter_map(|p| self.doc.para(wordcraft_doc::StoryRef::Body, p).map(|q| q.pid))
+                .collect(),
+        };
+        for pid in pids {
+            let Some(c) = self.collab.as_ref() else { return };
+            if c.texts.in_body(&pid.to_string()) {
+                continue;
+            }
+            let text = c.texts.text(&pid.to_string());
+            let current = self.doc.paragraph_by_pid(pid).and_then(|(s, p)| self.doc.para(s, &p).map(|q| q.text.clone()));
+            if only.is_none() && text.is_empty() && current.as_deref().is_some_and(|t| !t.is_empty()) {
+                continue; // never shared: nothing to follow
+            }
+            if let Some((story, path, pre, removed, inserted)) = self.doc.splice_paragraph_text(pid, &text, None) {
+                for pos in [&mut self.sel.anchor, &mut self.sel.focus] {
+                    if pos.story == story && pos.path == path {
+                        pos.off = shifted_off(pos.off, pre, removed, inserted);
+                    }
+                }
+                if removed + inserted > 0 {
+                    self.touch();
+                }
+            }
+            self.collab_sync_bold(pid);
+        }
+    }
+
+    /// A local command that added or removed top-level body paragraphs
+    /// (Enter, Backspace or Delete at a boundary, a multi-paragraph paste):
+    /// shared as leader inserts and deletes plus text syncs, never as a
+    /// replayed command, so every replica keeps the same paragraph ids. The
+    /// local document then follows the shared text too. False when the
+    /// paragraph structure did not change, or other blocks changed with it
+    /// (those keep the replay path).
+    pub(crate) fn collab_capture_structure(&mut self, before: &Document) -> bool {
+        let old = body_paragraphs_of(before);
+        let new = body_paragraphs_of(&self.doc);
+        let old_ids: Vec<&str> = old.iter().map(|p| p.para.as_str()).collect();
+        let new_ids: Vec<&str> = new.iter().map(|p| p.para.as_str()).collect();
+        if old_ids == new_ids || other_blocks_of(before) != other_blocks_of(&self.doc) {
+            return false;
+        }
+        let Some(c) = self.collab.as_mut() else { return false };
+        let mut updates: Vec<(String, Vec<u8>)> = Vec::new();
+        // Joins first, last to first, so each leader is still where it was.
+        for id in old_ids.iter().rev().filter(|id| !new_ids.contains(id)) {
+            if let Some(u) = c.texts.local_join(id) {
+                updates.push((id.to_string(), u));
+            }
+        }
+        // Splits in document order: each new paragraph opens after the one
+        // before it, at where that one's new text ends.
+        for (i, p) in new.iter().enumerate() {
+            if old_ids.contains(&p.para.as_str()) {
+                continue;
+            }
+            let Some(prev) = i.checked_sub(1).map(|j| &new[j]) else { continue };
+            let at = prev.text.len().min(c.texts.text(&prev.para).len()) as u32;
+            if let Some(u) = c.texts.local_split(&prev.para, at, &p.para, p.props.as_deref()) {
+                updates.push((p.para.clone(), u));
+            }
+        }
+        // Then every paragraph's text is the document's.
+        for p in &new {
+            if let Some(u) = c.texts.sync(&p.para, &p.text) {
+                updates.push((p.para.clone(), u));
+            }
+        }
+        for (para, update) in updates {
+            c.send(craft_collab::Kind::TextEdit { para, update, props: None });
+        }
+        self.collab_reconcile_body(None, None);
+        true
     }
 }
 
@@ -2114,6 +2364,177 @@ mod tests {
         host.collab_tick();
         assert_eq!(host.collab_stats()["unauthorized"], 1, "the replayable command is not dropped");
         assert_eq!(host.doc.para_paths(StoryRef::Body).len(), 2, "and it applied: the paragraph split");
+    }
+
+    /// The demo's tidy layout, checked before it is recorded: a heading-styled
+    /// title, then each author's own paragraph (Enter, then typing), then
+    /// each edits their own paragraph again. Every replica must agree on the
+    /// paragraphs, their text and their style, and later edits must land in
+    /// the right paragraph everywhere (the paragraph ids must match).
+    #[test]
+    fn a_heading_and_each_authors_own_paragraph_travel() {
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb", "cccccccc"]);
+        let (ta, tb, tc) = (bus.remove(0), bus.remove(0), bus.remove(0));
+        let mut h = session();
+        let mut i = session();
+        let mut e = session();
+        h.collab_attach("demo", "Hana", Box::new(ta));
+        i.collab_join("demo", "Ines", Box::new(tb));
+        e.collab_join("demo", "Eve", Box::new(tc));
+        let tick = |h: &mut Session, i: &mut Session, e: &mut Session| {
+            for _ in 0..3 {
+                i.collab_tick();
+                e.collab_tick();
+                h.collab_tick();
+            }
+        };
+        tick(&mut h, &mut i, &mut e);
+        h.run("text.insert", &json!({"text": "Field notes"})).expect("title");
+        h.run("para.heading1", &json!({})).expect("heading");
+        h.run("text.newParagraph", &json!({})).expect("enter");
+        h.run("text.insert", &json!({"text": "Hana, via helsinki."})).expect("Hana's paragraph");
+        tick(&mut h, &mut i, &mut e);
+        for (who, s) in [("Ines, via nuremberg.", &mut i), ("Eve, via amsterdam.", &mut e)] {
+            let last = s.doc.para_paths(StoryRef::Body).len() - 1;
+            let len = s.doc.para(StoryRef::Body, &wordcraft_doc::Path::top(last)).map(|p| p.len()).unwrap_or(0);
+            s.run("caret.set", &json!({"pos": {"story": "body", "path": [last], "off": len}})).expect("caret at the end");
+            s.run("text.newParagraph", &json!({})).expect("enter");
+            s.run("text.insert", &json!({"text": who})).expect("own paragraph");
+        }
+        tick(&mut h, &mut i, &mut e);
+        // Each edits their own paragraph again.
+        i.run("text.insert", &json!({"text": " More from Ines."})).expect("Ines again");
+        e.run("text.insert", &json!({"text": " More from Eve."})).expect("Eve again");
+        h.run("caret.set", &json!({"pos": {"story": "body", "path": [1], "off": 19}})).expect("Hana's end");
+        h.run("text.insert", &json!({"text": " More from Hana."})).expect("Hana again");
+        tick(&mut h, &mut i, &mut e);
+
+        let shape = |s: &Session| -> Vec<(String, Option<String>)> {
+            (0..s.doc.para_paths(StoryRef::Body).len())
+                .map(|n| {
+                    let p = s.doc.para(StoryRef::Body, &wordcraft_doc::Path::top(n)).expect("para");
+                    (p.text.clone(), p.props.style.clone())
+                })
+                .collect()
+        };
+        let hs = shape(&h);
+        assert_eq!(hs, shape(&i), "Hana and Ines agree");
+        assert_eq!(hs, shape(&e), "Hana and Eve agree");
+        assert_eq!(hs.len(), 4, "title + three paragraphs: {hs:?}");
+        assert_eq!(hs[0].1.as_deref(), Some("Heading1"), "the title is a heading everywhere: {hs:?}");
+        let texts: Vec<&str> = hs.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(texts.contains(&"Hana, via helsinki. More from Hana."), "{texts:?}");
+        assert!(texts.contains(&"Ines, via nuremberg. More from Ines."), "{texts:?}");
+        assert!(texts.contains(&"Eve, via amsterdam. More from Eve."), "{texts:?}");
+    }
+
+    fn two_authors() -> (Session, Session) {
+        let (ta, tb) = MemoryTransport::pair("aaaaaaaa", "bbbbbbbb");
+        let mut a = session();
+        let mut b = session();
+        a.collab_attach("demo", "Alice", Box::new(ta));
+        b.collab_join("demo", "Bob", Box::new(tb));
+        b.collab_tick();
+        a.collab_tick();
+        b.collab_tick();
+        (a, b)
+    }
+
+    fn settle(a: &mut Session, b: &mut Session) {
+        for _ in 0..3 {
+            a.collab_tick();
+            b.collab_tick();
+        }
+    }
+
+    fn paras(s: &Session) -> Vec<String> {
+        (0..s.doc.para_paths(StoryRef::Body).len())
+            .map(|n| s.doc.para(StoryRef::Body, &wordcraft_doc::Path::top(n)).map(|p| p.text.clone()).unwrap_or_default())
+            .collect()
+    }
+
+    fn caret(s: &mut Session, path: usize, off: usize) {
+        s.run("caret.set", &json!({"pos": {"story": "body", "path": [path], "off": off}})).expect("caret");
+    }
+
+    #[test]
+    fn a_backspace_join_travels_and_typing_after_it_lands_everywhere() {
+        let (mut a, mut b) = two_authors();
+        a.run("text.insert", &json!({"text": "one"})).expect("type");
+        a.run("text.newParagraph", &json!({})).expect("enter");
+        a.run("text.insert", &json!({"text": "two"})).expect("type");
+        settle(&mut a, &mut b);
+        assert_eq!(paras(&b), vec!["one", "two"]);
+        caret(&mut b, 1, 0);
+        b.run("text.backspace", &json!({})).expect("backspace at the paragraph start");
+        settle(&mut a, &mut b);
+
+        assert_eq!(paras(&a), vec!["onetwo"], "the join reached A");
+        b.run("text.insert", &json!({"text": " and three"})).expect("B types on");
+        settle(&mut a, &mut b);
+        assert_eq!(paras(&a), paras(&b));
+        assert!(paras(&a)[0].contains("and three"), "{:?}", paras(&a));
+    }
+
+    #[test]
+    fn two_concurrent_enters_in_one_paragraph_converge_without_a_duplicate() {
+        let (mut a, mut b) = two_authors();
+        a.run("text.insert", &json!({"text": "aaaa bbbb cccc"})).expect("type");
+        settle(&mut a, &mut b);
+        caret(&mut a, 0, 5);
+        caret(&mut b, 0, 10);
+        a.run("text.newParagraph", &json!({})).expect("A enter");
+        b.run("text.newParagraph", &json!({})).expect("B enter");
+        settle(&mut a, &mut b);
+        assert_eq!(paras(&a), paras(&b), "converged");
+        assert_eq!(paras(&a).concat(), "aaaa bbbb cccc", "nothing duplicated or lost: {:?}", paras(&a));
+        assert_eq!(paras(&a).len(), 3);
+    }
+
+    #[test]
+    fn undoing_an_enter_rejoins_the_paragraph_for_everyone() {
+        let (mut a, mut b) = two_authors();
+        a.run("text.insert", &json!({"text": "left right"})).expect("type");
+        settle(&mut a, &mut b);
+        caret(&mut a, 0, 5);
+        a.run("text.newParagraph", &json!({})).expect("enter");
+        settle(&mut a, &mut b);
+        assert_eq!(paras(&b), vec!["left ", "right"]);
+        assert!(a.undo(), "A undoes its Enter");
+        settle(&mut a, &mut b);
+        assert_eq!(paras(&a), vec!["left right"]);
+        assert_eq!(paras(&b), vec!["left right"], "rejoined at B too");
+    }
+
+    #[test]
+    fn a_peer_split_carries_the_local_caret_into_the_new_paragraph() {
+        let (mut a, mut b) = two_authors();
+        a.run("text.insert", &json!({"text": "Field notes. Hana writes."})).expect("type");
+        settle(&mut a, &mut b);
+        caret(&mut b, 0, 25); // B at the end
+        caret(&mut a, 0, 13);
+        a.run("text.newParagraph", &json!({})).expect("A splits before Hana");
+        settle(&mut a, &mut b);
+        b.run("text.insert", &json!({"text": " More."})).expect("B types on");
+        settle(&mut a, &mut b);
+        assert_eq!(paras(&a), vec!["Field notes. ", "Hana writes. More."]);
+        assert_eq!(paras(&a), paras(&b));
+    }
+
+    #[test]
+    fn a_split_keeps_the_tails_formatting_on_the_peer() {
+        let (mut a, mut b) = two_authors();
+        a.run("text.insert", &json!({"text": "plain italic"})).expect("type");
+        a.run("select.text", &json!({"text": "italic"})).expect("select");
+        a.run("format.italic", &json!({})).expect("italic");
+        settle(&mut a, &mut b);
+        caret(&mut a, 0, 6);
+        a.run("text.newParagraph", &json!({})).expect("enter before italic");
+        settle(&mut a, &mut b);
+        assert_eq!(paras(&b), vec!["plain ", "italic"]);
+        let p = b.doc.para(StoryRef::Body, &wordcraft_doc::Path::top(1)).expect("tail");
+        assert_eq!(p.props_of_char(0).italic, Some(true), "the tail kept its italic at B");
+        assert_eq!(runs_of(&a), runs_of(&b));
     }
 
     /// Today's working layout: paragraphs the host makes BEFORE the others

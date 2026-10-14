@@ -1270,7 +1270,12 @@ impl Session {
                 if !matches!(id, "select.addObject" | "arrange.ungroup") && (spec.mutates || self.sel != sel_before) {
                     self.also_selected.clear();
                 }
-                if let Some((pid, index, remove, insert, props)) = collab_exact {
+                // A change to the paragraph structure (Enter, a boundary
+                // Backspace or Delete) travels as structure, so every replica
+                // keeps the same paragraph ids; nothing else is sent for it.
+                let structural = capturing && before_doc.as_ref().is_some_and(|(d, ..)| self.collab_capture_structure(&d.clone()));
+                if structural {
+                } else if let Some((pid, index, remove, insert, props)) = collab_exact {
                     self.collab_apply_exact(pid, index, remove, insert, props);
                 } else if let Some((pid, index, len, bold)) = collab_style {
                     self.collab_apply_style(pid, index, len, bold);

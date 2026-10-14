@@ -229,6 +229,17 @@ fn app_icon() -> Option<egui::IconData> {
     eframe::icon_data::from_png_bytes(png).map_err(|e| log::warn!("app icon: {e}")).ok()
 }
 
+/// The build's identity: upstream's unless a fork's build sets its own at
+/// compile time (the mesh preview), so the window matches its desktop entry.
+const APP_ID: &str = match option_env!("WORDCRAFT_APP_ID") {
+    Some(id) => id,
+    None => "ai.storyteller.wordcraft",
+};
+const APP_NAME: &str = match option_env!("WORDCRAFT_APP_NAME") {
+    Some(name) => name,
+    None => "WordCraft",
+};
+
 /// The commit the build came from (short), or `dev`.
 fn build_sha() -> &'static str {
     option_env!("WORDCRAFT_BUILD_SHA").map(|s| s.get(..8).unwrap_or(s)).unwrap_or("dev")
@@ -271,8 +282,8 @@ fn main() -> eframe::Result {
     }
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("WordCraft")
-            .with_app_id("ai.storyteller.wordcraft")
+            .with_title(APP_NAME)
+            .with_app_id(APP_ID)
             .with_inner_size([1440.0, 920.0])
             .with_min_inner_size([760.0, 480.0])
             .with_drag_and_drop(true)
@@ -311,7 +322,7 @@ fn main() -> eframe::Result {
     #[cfg(target_os = "macos")]
     let apple_events = &apple_events;
     eframe::run_native(
-        "WordCraft",
+        APP_NAME,
         options,
         Box::new(move |cc| {
             // The system region picks the new document's paper, the units and the decimal

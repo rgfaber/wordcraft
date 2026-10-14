@@ -21,3 +21,18 @@ jobs:
   lint:
     # Intentionally tracked at @main (not SHA-pinned) so org-wide CI improvements, security fixes, and build optimizations propagate without PR churn across all craftapp repos.
     uses: storytold/craft-common-actions/.github/workflows/packaging-lint.yml@main
+
+  mesh-preview:
+    # The fork's mesh preview build (packaging/linux/mesh-preview.sh) carries its own identity.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends desktop-file-utils appstream
+      - name: Mesh preview desktop entry and AppStream
+        run: |
+          desktop-file-validate packaging/linux/io.macula.wordcraft-mesh.desktop
+          sed -e 's/@VERSION@/0.0.0/' -e 's/@DATE@/2026-01-01/' packaging/linux/io.macula.wordcraft-mesh.metainfo.xml.in >"$RUNNER_TEMP/io.macula.wordcraft-mesh.metainfo.xml"
+          appstreamcli validate --no-net --explain "$RUNNER_TEMP/io.macula.wordcraft-mesh.metainfo.xml"

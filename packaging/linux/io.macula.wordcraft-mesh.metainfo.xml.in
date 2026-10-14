@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata for the mesh preview build of the rgfaber/wordcraft fork. package.sh
+     substitutes @VERSION@ and @DATE@. -->
+<component type="desktop-application">
+  <id>io.macula.wordcraft-mesh</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>WordCraft (mesh preview)</name>
+  <summary>Write documents together over the Macula mesh</summary>
+  <developer id="io.macula">
+    <name>Macula</name>
+  </developer>
+  <description>
+    <p>
+      A preview build of WordCraft, the open-source word processor, with co-editing over the Macula mesh: people on different machines edit one document, signed edit by signed edit, with no server holding it. A host shares a document by invite, or with the members of a realm, including a realm other than its own.
+    </p>
+    <p>
+      This is a fork's build, not an upstream WordCraft release.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.macula.wordcraft-mesh.desktop</launchable>
+  <icon type="stock">io.macula.wordcraft-mesh</icon>
+  <url type="homepage">https://github.com/rgfaber/wordcraft</url>
+  <url type="bugtracker">https://github.com/rgfaber/wordcraft/issues</url>
+  <categories>
+    <category>Office</category>
+    <category>WordProcessor</category>
+  </categories>
+  <keywords>
+    <keyword>word processor</keyword>
+    <keyword>collaboration</keyword>
+    <keyword>mesh</keyword>
+  </keywords>
+  <requires>
+    <display_length compare="ge">760</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <provides>
+    <binary>wordcraft-mesh</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>

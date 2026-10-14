@@ -29,11 +29,11 @@ wordcraft-control-key = { path = "crates/control-key" }
 wordcraft-ui-egui = { path = "crates/ui-egui" }
 wordcraft-metafile = { path = "crates/metafile" }
 # the shared Craft collaboration seam
-craft-collab = { package = "macula-craft-seam", version = "0.4" }
+craft-collab = { package = "macula-craft-seam", version = "0.5.1" }
 # the shared Share and Sign in windows
-craft-share = { package = "macula-craft-share", version = "0.4" }
+craft-share = { package = "macula-craft-share", version = "0.5" }
 # its mesh transport (macula-rust released crates only)
-macula-craft-collab = "0.4"
+macula-craft-collab = "0.5"
 
 # foundation
 kurbo = { version = "0.13", features = ["serde"] }

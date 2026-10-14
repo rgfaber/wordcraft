@@ -70,8 +70,8 @@ pub(crate) struct Reader<'p> {
     /// Reading a footnote or endnote separator or continuation notice (where the `w:separator`
     /// and `w:continuationSeparator` run elements belong).
     in_note_sep: bool,
-    pub comment_map: HashMap<String, u32>,
-    pub comments_ended: HashSet<u32>,
+    pub comment_map: HashMap<String, u64>,
+    pub comments_ended: HashSet<u64>,
     pub bookmarks: HashMap<String, String>,
     /// Restrict Editing exception ranges (`w:permStart`): the file's id → ours.
     pub perms: HashMap<String, u32>,
@@ -1126,9 +1126,9 @@ impl Reader<'_> {
     fn read_comments(&mut self, path: &str, ext: Option<&str>) -> Result<(), DocxError> {
         let Some(root) = self.xml(path)? else { return Ok(()) };
         let rels = self.pkg.rels(path);
-        let mut by_para: HashMap<String, u32> = HashMap::new();
-        let mut next_id = 0u32;
-        let mut entries: BTreeMap<u32, Comment> = BTreeMap::new();
+        let mut by_para: HashMap<String, u64> = HashMap::new();
+        let mut next_id = 0u64;
+        let mut entries: BTreeMap<u64, Comment> = BTreeMap::new();
         for c in root.children("w:comment") {
             if self.doc.parts.len() >= MAX_PARTS {
                 break;
@@ -1137,7 +1137,7 @@ impl Reader<'_> {
             if self.comment_map.contains_key(&file_id) {
                 continue;
             }
-            let id = match file_id.parse::<u32>() {
+            let id = match file_id.parse::<u64>() {
                 Ok(v) if !entries.contains_key(&v) => v,
                 _ => {
                     while entries.contains_key(&next_id) || self.comment_map.values().any(|v| *v == next_id) {

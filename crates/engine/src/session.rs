@@ -1223,6 +1223,10 @@ impl Session {
         }
         let sel_before = self.sel.clone();
         let capturing = local && spec.mutates && self.collab.is_some();
+        // A comment made while shared carries its id, author and date in the command, so every
+        // replica's replay makes the same comment.
+        let stamped = if capturing { self.stamp_comment(id, params) } else { None };
+        let params = stamped.as_ref().unwrap_or(params);
         let collab_exact = capturing.then(|| self.collab_exact_plan(id, params)).flatten();
         let collab_style = if capturing && collab_exact.is_none() { self.collab_style_plan(id, params) } else { None };
         let collab_command = if capturing && collab_exact.is_none() && collab_style.is_none() { self.collab_command_plan(id, params) } else { None };
@@ -1278,7 +1282,10 @@ impl Session {
                 // Backspace or Delete) travels as structure, so every replica
                 // keeps the same paragraph ids; nothing else is sent for it.
                 let structural = capturing && before_doc.as_ref().is_some_and(|(d, ..)| self.collab_capture_structure(&d.clone()));
-                if structural {
+                // Travelling objects and comments go as text with objects and register
+                // entries, never replayed (the structure, if it changed, is shared first).
+                let objects = capturing && before_doc.as_ref().is_some_and(|(d, ..)| self.collab_capture_objects(&d.clone()));
+                if structural || objects {
                 } else if let Some((pid, index, remove, insert, props)) = collab_exact {
                     self.collab_apply_exact(pid, index, remove, insert, props);
                 } else if let Some((pid, index, len, bold)) = collab_style {

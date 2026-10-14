@@ -109,7 +109,7 @@ pub struct CanvasState {
     /// Pages per row last frame; when it changes the caret's page is scrolled back into view.
     pub cols: usize,
     /// The comment whose balloon is selected (its text is editable in place, like Word's).
-    pub balloon: Option<u32>,
+    pub balloon: Option<u64>,
     /// Give the selected balloon's text field keyboard focus on its next frame.
     pub(crate) balloon_focus: bool,
     /// The selected balloon shows a reply field.
@@ -117,7 +117,7 @@ pub struct CanvasState {
     /// The selected balloon's height last frame (screen points), for its click area.
     balloon_h: f32,
     /// Screen rects of the comment balloons last frame (for the control channel and tests).
-    pub balloon_rects: Vec<(u32, Rect)>,
+    pub balloon_rects: Vec<(u64, Rect)>,
     /// A paste event arrived since the last Mod+V release (see `keys::canvas_events`).
     pub(crate) pasted: bool,
     /// Draw Table or Eraser is on (`table_pen`): presses draw instead of moving the caret.
@@ -1408,7 +1408,7 @@ fn balloons(app: &mut WordApp, ui: &mut Ui, painter: &egui::Painter, rects: &[Re
     let clip = ui.clip_rect();
     // Replies hang under the comment they answer rather than getting balloons of their own.
     let is_reply = |c: &wordcraft_doc::Comment| c.parent.is_some_and(|p| app.session.doc.comments.contains_key(&p));
-    let mut replies: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut replies: HashMap<u64, Vec<u64>> = HashMap::new();
     for (id, c) in &app.session.doc.comments {
         if let Some(p) = c.parent.filter(|_| is_reply(c)) {
             replies.entry(p).or_default().push(*id);
@@ -1451,7 +1451,7 @@ fn balloons(app: &mut WordApp, ui: &mut Ui, painter: &egui::Painter, rects: &[Re
     }
     let palette = [t.blue, Color32::from_rgb(0xB0, 0x3A, 0x2E), Color32::from_rgb(0x2E, 0x7D, 0x32), Color32::from_rgb(0x8E, 0x44, 0xAD), t.orange];
     let mut authors: Vec<String> = Vec::new();
-    let mut clicked: Option<(u32, Pos)> = None;
+    let mut clicked: Option<(u64, Pos)> = None;
     // The markup area extends each page.
     for (pi, pr) in rects.iter().enumerate() {
         let page_scale = layout.pages.get(pi).map_or(scale, |page| page_screen_scale(*pr, page, scale));
@@ -1515,7 +1515,7 @@ fn balloons(app: &mut WordApp, ui: &mut Ui, painter: &egui::Painter, rects: &[Re
             });
             let color = palette.get(ai % palette.len()).copied().unwrap_or(t.blue);
             let fs = (11.0 * page_scale / PX_PER_PT).clamp(8.0, 16.0);
-            let thread: Vec<u32> = replies.get(id).cloned().unwrap_or_default();
+            let thread: Vec<u64> = replies.get(id).cloned().unwrap_or_default();
             let anchor = pos2(pr.min.x + ax * page_scale, pr.min.y + ay * page_scale);
             let top = (anchor.y - 12.0).max(next_y);
             let active = app.canvas.balloon == Some(*id);
@@ -1582,7 +1582,7 @@ fn balloons(app: &mut WordApp, ui: &mut Ui, painter: &egui::Painter, rects: &[Re
 
 /// What a balloon in the markup area shows.
 enum Balloon {
-    Comment(u32),
+    Comment(u64),
     /// A tracked formatting change, move or deletion: its author and "Formatted: …" /
     /// "Moved from" / "Deleted: …".
     Format(String, String),
@@ -1613,7 +1613,7 @@ fn card_shapes(painter: &egui::Painter, t: &Tokens, card: Rect, color: Color32, 
 /// step via `review.editComment`), an optional reply field, and Reply / Resolve / Delete.
 /// `card` carries last frame's size; returns this frame's.
 #[allow(clippy::too_many_arguments)]
-fn active_balloon(app: &mut WordApp, ui: &mut Ui, painter: &egui::Painter, id: u32, thread: &[u32], card: Rect, fs: f32, color: Color32) -> Rect {
+fn active_balloon(app: &mut WordApp, ui: &mut Ui, painter: &egui::Painter, id: u64, thread: &[u64], card: Rect, fs: f32, color: Color32) -> Rect {
     let t = Tokens::get(ui.ctx());
     let slot = painter.add(egui::Shape::Noop);
     // The card's own click area sits under its fields, so a click on its padding stays here.
@@ -1623,7 +1623,7 @@ fn active_balloon(app: &mut WordApp, ui: &mut Ui, painter: &egui::Painter, id: u
     child.spacing_mut().item_spacing.y = 3.0;
     let (font, bold, small) = (regular(fs), semibold(fs), regular((fs * 0.9).max(8.0)));
     let focus = std::mem::take(&mut app.canvas.balloon_focus);
-    let name = |app: &WordApp, cid: u32| app.session.doc.comments.get(&cid).map(|c| author_name(&c.author)).unwrap_or_default();
+    let name = |app: &WordApp, cid: u64| app.session.doc.comments.get(&cid).map(|c| author_name(&c.author)).unwrap_or_default();
     let resolved = app.session.doc.comments.get(&id).is_some_and(|c| c.resolved);
     child.horizontal(|ui| {
         ui.label(egui::RichText::new(name(app, id)).font(bold.clone()).color(t.text));
@@ -1667,7 +1667,7 @@ fn active_balloon(app: &mut WordApp, ui: &mut Ui, painter: &egui::Painter, id: u
 
 /// Select a comment's balloon (its text gets the keyboard), writing back any edit in the one
 /// selected before.
-pub fn select_balloon(app: &mut WordApp, ctx: &egui::Context, id: u32) {
+pub fn select_balloon(app: &mut WordApp, ctx: &egui::Context, id: u64) {
     if app.canvas.balloon == Some(id) {
         return;
     }
@@ -1683,7 +1683,7 @@ pub fn deselect_balloon(app: &mut WordApp, ctx: &egui::Context) {
     let Some(id) = app.canvas.balloon.take() else { return };
     app.canvas.balloon_reply = false;
     app.canvas.balloon_focus = false;
-    let thread: Vec<u32> =
+    let thread: Vec<u64> =
         std::iter::once(id).chain(app.session.doc.comments.iter().filter(|(_, c)| c.parent == Some(id)).map(|(k, _)| *k)).collect();
     for c in thread {
         crate::panes::commit_comment(app, ctx, c);
@@ -2943,7 +2943,7 @@ mod tests {
         let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default());
         a.run("text.insert", json!({"text": "Some text here"})).unwrap();
         a.run("select.text", json!({"text": "text"})).unwrap();
-        let id = a.run("review.newComment", json!({"text": "Original"})).unwrap()["id"].as_u64().unwrap() as u32;
+        let id = a.run("review.newComment", json!({"text": "Original"})).unwrap()["id"].as_u64().unwrap();
         a.run("view.commentsPane", json!({"value": false})).unwrap();
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
             |ui, app: &mut WordApp| {

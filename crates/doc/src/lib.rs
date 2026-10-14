@@ -316,7 +316,7 @@ pub struct Comment {
     /// ISO 8601.
     pub date: String,
     /// Reply to this comment id.
-    pub parent: Option<u32>,
+    pub parent: Option<u64>,
     pub resolved: bool,
     /// `Document::parts` id of the comment text.
     pub part: u32,
@@ -569,7 +569,9 @@ pub struct Document {
     pub parts: BTreeMap<u32, Part>,
     pub styles: StyleSheet,
     pub numbering: Numbering,
-    pub comments: BTreeMap<u32, Comment>,
+    /// By id: small numbers in a document never shared; while shared, author-scoped ids
+    /// (`craft_collab::author_id`) so two authors' comments never collide.
+    pub comments: BTreeMap<u64, Comment>,
     pub revisions: Vec<Revision>,
     pub settings: Settings,
     pub core: CoreProps,
@@ -798,6 +800,15 @@ impl Document {
             } else {
                 merged.push(r);
             }
+        }
+        // Objects stay paired with their characters: the ones in the removed span go, and each
+        // object character the change brings gets an inert placeholder until whoever made the
+        // change says what it is (a co-authored document's shared text does, see `set_object`).
+        let k0 = p.text[..pre].chars().filter(|c| *c == para::OBJ).count();
+        let gone = p.text[pre..pre + removed].chars().filter(|c| *c == para::OBJ).count();
+        let came = text[pre..pre + inserted].chars().filter(|c| *c == para::OBJ).count();
+        if gone + came > 0 && k0 + gone <= p.objects.len() {
+            p.objects.splice(k0..k0 + gone, std::iter::repeat_with(InlineObject::placeholder).take(came));
         }
         p.text = text.to_string();
         p.runs = merged;
@@ -1322,6 +1333,33 @@ impl Document {
                 }
             }
         }
+    }
+
+    /// Renumbers the comments 0, 1, 2, ... in id order, with their anchors and replies' parents:
+    /// a co-authored document's author-scoped ids are too large for formats that keep comment ids
+    /// in 32 bits (`w:id`). Returns whether anything changed.
+    pub fn compact_comment_ids(&mut self) -> bool {
+        let map: BTreeMap<u64, u64> = self.comments.keys().enumerate().map(|(i, id)| (*id, i as u64)).collect();
+        if map.iter().all(|(old, new)| old == new) {
+            return false;
+        }
+        let comments = std::mem::take(&mut self.comments);
+        self.comments = comments
+            .into_iter()
+            .map(|(id, mut c)| {
+                c.parent = c.parent.and_then(|p| map.get(&p).copied());
+                (map[&id], c)
+            })
+            .collect();
+        let is_anchor = |o: &InlineObject| matches!(o, InlineObject::CommentStart { .. } | InlineObject::CommentEnd { .. });
+        self.objects_mut(&is_anchor, &mut |o| {
+            if let InlineObject::CommentStart { id } | InlineObject::CommentEnd { id } = o
+                && let Some(new) = map.get(id)
+            {
+                *id = *new;
+            }
+        });
+        true
     }
 
     /// Number of paragraphs in the body (all depths).

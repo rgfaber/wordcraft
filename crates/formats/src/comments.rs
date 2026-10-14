@@ -24,7 +24,7 @@ pub struct Note {
     pub replies: Vec<(String, String)>,
 }
 
-fn root(doc: &Document, id: u32) -> u32 {
+fn root(doc: &Document, id: u64) -> u64 {
     let mut cur = id;
     for _ in 0..MAX_PARENT_CHAIN {
         match doc.comments.get(&cur).and_then(|c| c.parent) {
@@ -50,10 +50,10 @@ pub fn notes(doc: &Document) -> Vec<Note> {
         return Vec::new();
     }
     // Anchor order and the text between each comment's start and end.
-    let mut order: Vec<u32> = Vec::new();
+    let mut order: Vec<u64> = Vec::new();
     let mut seen = HashSet::new();
-    let mut quotes: HashMap<u32, String> = HashMap::new();
-    let mut open: Vec<u32> = Vec::new();
+    let mut quotes: HashMap<u64, String> = HashMap::new();
+    let mut open: Vec<u64> = Vec::new();
     for path in doc.para_paths(StoryRef::Body) {
         let Some(p) = doc.para(StoryRef::Body, &path) else { continue };
         for (off, c) in p.text.char_indices() {
@@ -88,7 +88,7 @@ pub fn notes(doc: &Document) -> Vec<Note> {
             order.push(*id);
         }
     }
-    let mut replies: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    let mut replies: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for id in doc.comments.keys() {
         let r = root(doc, *id);
         if r != *id {

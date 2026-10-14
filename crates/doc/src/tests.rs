@@ -294,3 +294,52 @@ fn custom_props_set_get_remove() {
     assert!(!d.remove_custom_prop("other"));
     assert_eq!(d.custom_props.len(), 1);
 }
+
+/// A body paragraph "ab" with comment `id` anchored around "a", its id set.
+fn commented(id: u64) -> Document {
+    let mut d = Document { body: vec![para_block(Paragraph::with_text("ab", CharProps::default()))], ..Default::default() };
+    d.ensure_pids();
+    let p = CharProps::default();
+    d.insert_object(&Pos::body(0, 1), InlineObject::CommentEnd { id }, &p).unwrap();
+    d.insert_object(&Pos::body(0, 0), InlineObject::CommentStart { id }, &p).unwrap();
+    d.comments.insert(id, Comment::default());
+    d
+}
+
+#[test]
+fn compacting_comment_ids_renumbers_anchors_and_replies() {
+    let big = (7u64 << 32) | 3;
+    let mut d = commented(big);
+    d.comments.insert(big + 1, Comment { parent: Some(big), ..Default::default() });
+    assert!(d.compact_comment_ids());
+    assert_eq!(d.comments.keys().copied().collect::<Vec<_>>(), vec![0, 1]);
+    assert_eq!(d.comments[&1].parent, Some(0));
+    let p = d.para(StoryRef::Body, &Path::top(0)).unwrap();
+    let ids: Vec<u64> = p
+        .object_offsets()
+        .into_iter()
+        .filter_map(|o| match p.object_at(o) {
+            Some(InlineObject::CommentStart { id } | InlineObject::CommentEnd { id }) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids, vec![0, 0]);
+    assert!(!d.compact_comment_ids(), "already compact");
+}
+
+#[test]
+fn a_spliced_text_keeps_objects_paired_with_their_characters() {
+    let mut d = commented(5);
+    let pid = d.para(StoryRef::Body, &Path::top(0)).unwrap().pid;
+    let o = para::OBJ;
+    // The text gains an object character before "b" (whose object isn't known yet) and loses none.
+    d.splice_paragraph_text(pid, &format!("{o}a{o}{o}b"), None).unwrap();
+    let p = d.para(StoryRef::Body, &Path::top(0)).unwrap();
+    assert_eq!(p.objects.len(), 3, "one object per object character");
+    assert_eq!(p.object_at(0), Some(&InlineObject::CommentStart { id: 5 }));
+    // Then the first anchor goes: its object goes with it.
+    d.splice_paragraph_text(pid, &format!("a{o}{o}b"), None).unwrap();
+    let p = d.para(StoryRef::Body, &Path::top(0)).unwrap();
+    assert_eq!(p.objects.len(), 2);
+    assert_eq!(p.objects.iter().filter(|x| matches!(x, InlineObject::CommentEnd { id: 5 })).count(), 1);
+}

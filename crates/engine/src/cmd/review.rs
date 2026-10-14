@@ -9,12 +9,12 @@ use crate::{CmdError, CmdResult, CommandSpec, Selection, Session, p};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        CommandSpec::new("review.newComment", "New Comment", "Review › Comments", new_comment).key("Mod+Alt+M").params(r#"{"text": string}"#),
-        CommandSpec::new("review.reply", "Reply", "Review › Comments", reply).params(r#"{"id": n, "text": string}"#),
+        CommandSpec::new("review.newComment", "New Comment", "Review › Comments", new_comment).key("Mod+Alt+M").params(r#"{"text": string, "newId"?: n, "author"?: string, "initials"?: string, "date"?: string}"#),
+        CommandSpec::new("review.reply", "Reply", "Review › Comments", reply).params(r#"{"id": n, "text": string, "newId"?: n, "author"?: string, "initials"?: string, "date"?: string}"#),
         CommandSpec::new("review.editComment", "Edit Comment", "Review › Comments", edit_comment).params(r#"{"id": n, "text": string}"#),
         CommandSpec::new("review.deleteComment", "Delete", "Review › Comments", delete_comment).params(r#"{"id"?: n, "all"?: bool}"#),
         CommandSpec::new("review.resolveComment", "Resolve", "Review › Comments", |s, v| {
-            let id = p::u64(v, "id").map(|x| x as u32).or_else(|| comment_at_caret(s)).ok_or_else(|| CmdError::Params("`id` required".into()))?;
+            let id = p::u64(v, "id").or_else(|| comment_at_caret(s)).ok_or_else(|| CmdError::Params("`id` required".into()))?;
             let c = s.doc.comments.get_mut(&id).ok_or_else(|| CmdError::Params("no such comment".into()))?;
             c.resolved = p::bool(v, "value").unwrap_or(!c.resolved);
             sel_result(s)
@@ -128,9 +128,8 @@ fn new_comment(s: &mut Session, v: &Value) -> CmdResult {
         (a, b)
     };
     let part = s.doc.add_part(PartKind::Comment, vec![para_block(Paragraph::with_text(&text, Default::default()))]);
-    let id = s.doc.comments.keys().next_back().map(|k| k + 1).unwrap_or(0);
-    let initials = s.user_initials();
-    s.doc.comments.insert(id, Comment { author: s.author.clone(), initials, date: now_iso(), parent: None, resolved: false, part });
+    let (id, author, initials, date) = stamp(s, v);
+    s.doc.comments.insert(id, Comment { author, initials, date, parent: None, resolved: false, part });
     let props = Default::default();
     s.doc.insert_object(&b, InlineObject::CommentEnd { id }, &props)?;
     s.doc.insert_object(&a, InlineObject::CommentStart { id }, &props)?;
@@ -138,22 +137,31 @@ fn new_comment(s: &mut Session, v: &Value) -> CmdResult {
     Ok(json!({"id": id, "story": part}))
 }
 
+/// A new comment's id, author, initials and date: the ones the command carries (a co-author's
+/// comment replayed here, see [`Session::stamp_comment`]), else this author's own.
+fn stamp(s: &Session, v: &Value) -> (u64, String, String, String) {
+    let id = p::u64(v, "newId").filter(|id| !s.doc.comments.contains_key(id)).unwrap_or_else(|| s.next_comment_id());
+    let author = p::str(v, "author").map_or_else(|| s.comment_author(), str::to_string);
+    let initials = p::str(v, "initials").map_or_else(|| s.comment_initials(), str::to_string);
+    let date = p::str(v, "date").map_or_else(now_iso, str::to_string);
+    (id, author, initials, date)
+}
+
 fn reply(s: &mut Session, v: &Value) -> CmdResult {
-    let parent = p::u64(v, "id").map(|x| x as u32).ok_or_else(|| CmdError::Params("`id` required".into()))?;
+    let parent = p::u64(v, "id").ok_or_else(|| CmdError::Params("`id` required".into()))?;
     if !s.doc.comments.contains_key(&parent) {
         return Err(CmdError::Params("no such comment".into()));
     }
     let text = p::req_str(v, "text")?;
     let part = s.doc.add_part(PartKind::Comment, vec![para_block(Paragraph::with_text(text, Default::default()))]);
-    let id = s.doc.comments.keys().next_back().map(|k| k + 1).unwrap_or(0);
-    let initials = s.user_initials();
-    s.doc.comments.insert(id, Comment { author: s.author.clone(), initials, date: now_iso(), parent: Some(parent), resolved: false, part });
+    let (id, author, initials, date) = stamp(s, v);
+    s.doc.comments.insert(id, Comment { author, initials, date, parent: Some(parent), resolved: false, part });
     Ok(json!({"id": id}))
 }
 
 /// Replace a comment's (or reply's) text; each line becomes a paragraph.
 fn edit_comment(s: &mut Session, v: &Value) -> CmdResult {
-    let id = p::u64(v, "id").and_then(|x| u32::try_from(x).ok()).ok_or_else(|| CmdError::Params("`id` required".into()))?;
+    let id = p::u64(v, "id").ok_or_else(|| CmdError::Params("`id` required".into()))?;
     let text = p::req_str(v, "text")?;
     let part = s.doc.comments.get(&id).map(|c| c.part).ok_or_else(|| CmdError::Params("no such comment".into()))?;
     let blocks = text.split('\n').take(10_000).map(|l| para_block(Paragraph::with_text(l.trim_end_matches('\r'), Default::default()))).collect();
@@ -162,10 +170,10 @@ fn edit_comment(s: &mut Session, v: &Value) -> CmdResult {
 }
 
 /// Comment anchored around the caret.
-fn comment_at_caret(s: &Session) -> Option<u32> {
+fn comment_at_caret(s: &Session) -> Option<u64> {
     let f = &s.sel.focus;
     let p = s.doc.para_at(f)?;
-    let mut open: Vec<u32> = Vec::new();
+    let mut open: Vec<u64> = Vec::new();
     for off in p.object_offsets() {
         if off > f.off {
             break;
@@ -184,7 +192,7 @@ fn comment_at_caret(s: &Session) -> Option<u32> {
     })
 }
 
-fn remove_anchors(s: &mut Session, ids: &[u32]) -> Result<(), CmdError> {
+fn remove_anchors(s: &mut Session, ids: &[u64]) -> Result<(), CmdError> {
     for story in [StoryRef::Body] {
         for path in s.doc.para_paths(story) {
             let offs: Vec<usize> = s
@@ -210,10 +218,10 @@ fn remove_anchors(s: &mut Session, ids: &[u32]) -> Result<(), CmdError> {
 }
 
 fn delete_comment(s: &mut Session, v: &Value) -> CmdResult {
-    let ids: Vec<u32> = if p::bool(v, "all").unwrap_or(false) {
+    let ids: Vec<u64> = if p::bool(v, "all").unwrap_or(false) {
         s.doc.comments.keys().copied().collect()
     } else {
-        let id = p::u64(v, "id").map(|x| x as u32).or_else(|| comment_at_caret(s)).ok_or_else(|| CmdError::Params("no comment here".into()))?;
+        let id = p::u64(v, "id").or_else(|| comment_at_caret(s)).ok_or_else(|| CmdError::Params("no comment here".into()))?;
         // The comment and its replies.
         let mut v = vec![id];
         v.extend(s.doc.comments.iter().filter(|(_, c)| c.parent == Some(id)).map(|(k, _)| *k));
@@ -230,8 +238,8 @@ fn delete_comment(s: &mut Session, v: &Value) -> CmdResult {
 }
 
 /// Comments in document order with their anchors.
-pub fn comment_list(s: &Session) -> Vec<(u32, Option<Pos>)> {
-    let mut found: Vec<(u32, Option<Pos>)> = Vec::new();
+pub fn comment_list(s: &Session) -> Vec<(u64, Option<Pos>)> {
+    let mut found: Vec<(u64, Option<Pos>)> = Vec::new();
     for path in s.doc.para_paths(StoryRef::Body) {
         let Some(p) = s.doc.para(StoryRef::Body, &path) else { continue };
         for o in p.object_offsets() {

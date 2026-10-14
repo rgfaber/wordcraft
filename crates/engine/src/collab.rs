@@ -9,11 +9,20 @@
 //! it ran under, which the peers replay through the same registry with
 //! [`Origin::Remote`](craft_collab::Origin). Peer edits apply outside the
 //! local undo history; undo reverts only this author's own edits.
+//!
+//! Inline objects that travel (comment anchors; see [`travels`]) are in the
+//! shared text itself, each an object character carrying the object, so they
+//! keep their place among concurrent typing exactly as text does; a local
+//! change to them is shared as text with objects, never as a replayed
+//! command, and a peer's change rebuilds them from the shared text. A
+//! comment's own fields (author, date, resolved, its text, the comment it
+//! answers) are the register entry `m/<comment id>`, an empty value once it
+//! is deleted.
 
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
-use wordcraft_doc::{Document, Pos};
+use wordcraft_doc::{Document, InlineObject, Pos};
 
 #[cfg(test)]
 use craft_collab::now_ms;
@@ -65,6 +74,48 @@ impl Session {
     /// windows drive.
     pub fn collab_session(&self) -> Option<&craft_collab::CollabSession> {
         self.collab.as_ref().map(|c| &c.shared)
+    }
+
+    /// The id the next comment or reply gets: while shared, this author's next author-scoped id
+    /// ([`craft_collab::ids::author_id`]), so two authors' comments never collide; else one past
+    /// the highest.
+    pub fn next_comment_id(&self) -> u64 {
+        let Some(c) = self.collab_session() else { return self.doc.comments.keys().next_back().map_or(0, |k| k + 1) };
+        let tag = craft_collab::ids::author_tag(c.author());
+        let mine = |id: &u64| craft_collab::ids::author_id(tag, 0) == id & !u64::from(u32::MAX);
+        let n = self.doc.comments.keys().filter(|id| mine(id)).map(|id| *id as u32).max().unwrap_or(0);
+        craft_collab::ids::author_id(tag, n.saturating_add(1))
+    }
+
+    /// The name a new comment carries: this author's name in the shared document, else the
+    /// user name.
+    pub fn comment_author(&self) -> String {
+        match self.collab_session() {
+            Some(c) if !c.name().is_empty() => c.name().to_string(),
+            _ => self.author.clone(),
+        }
+    }
+
+    /// The initials a new comment carries: the shared name's while shared, else the user's.
+    pub fn comment_initials(&self) -> String {
+        match self.collab_session() {
+            Some(c) if !c.name().is_empty() => c.name().split_whitespace().filter_map(|w| w.chars().next()).collect(),
+            _ => self.user_initials(),
+        }
+    }
+
+    /// `params` for a new comment or reply with its id, author, initials and date filled in, so
+    /// the peers' replay makes exactly this comment; `None` for any other command.
+    pub(crate) fn stamp_comment(&self, id: &str, params: &Value) -> Option<Value> {
+        if !matches!(id, "review.newComment" | "review.reply") || params.get("newId").is_some() {
+            return None;
+        }
+        let mut v = params.as_object().cloned().unwrap_or_default();
+        v.insert("newId".into(), json!(self.next_comment_id()));
+        v.insert("author".into(), json!(self.comment_author()));
+        v.insert("initials".into(), json!(self.comment_initials()));
+        v.insert("date".into(), json!(crate::cmd::now_iso()));
+        Some(Value::Object(v))
     }
 
     /// The same, mutable.
@@ -480,6 +531,7 @@ impl Session {
             craft_collab::Inbound::Text { para, update, props, .. } => {
                 let carried_props: Option<wordcraft_doc::CharProps> = props.as_deref().and_then(|b| serde_json::from_slice(b).ok());
                 self.collab_apply_remote_text(&para, &update, carried_props.as_ref());
+                self.collab_follow_comments();
             }
             craft_collab::Inbound::Command { author, id, params, anchor } => {
                 // A holder may replay only the commands the local capture
@@ -553,11 +605,131 @@ impl Session {
             return false;
         }
         // The undo may have touched any paragraph (a split, a join, typing
-        // anywhere): the document follows the shared text.
+        // anywhere) or a comment: the document follows the shared text.
         self.collab_reconcile_body(None, None);
         self.collab_reconcile_outside(None);
+        self.collab_follow_comments();
         self.clamp_selection();
         true
+    }
+
+    /// After a local command: shares what it did to travelling objects (as
+    /// each changed paragraph's text with its objects) and to comments (as
+    /// their register entries), one undo step. True when it shared anything:
+    /// the command is then not replayed.
+    pub(crate) fn collab_capture_objects(&mut self, before: &Document) -> bool {
+        let (old, new) = (paragraphs_by_pid(before), paragraphs_by_pid(&self.doc));
+        let mut paras: Vec<(u64, String, Vec<(u32, String)>)> = Vec::new();
+        for (pid, p) in &new {
+            let objects = travelling_objects(p);
+            let was = old.get(pid).map(travelling_objects).unwrap_or_default();
+            if was != objects {
+                paras.push((*pid, p.text.clone(), objects));
+            }
+        }
+        paras.sort_by_key(|(pid, ..)| *pid);
+        let mut records: Vec<(String, String)> = Vec::new();
+        for (id, c) in &self.doc.comments {
+            let record = comment_record(&self.doc, c);
+            if before.comments.get(id).map(|b| comment_record(before, b)) != Some(record.clone()) {
+                records.push((comment_key(*id), record));
+            }
+        }
+        for id in before.comments.keys().filter(|id| !self.doc.comments.contains_key(id)) {
+            records.push((comment_key(*id), String::new()));
+        }
+        if paras.is_empty() && records.is_empty() {
+            return false;
+        }
+        let Some(c) = self.collab.as_mut() else { return false };
+        let texts = c.shared.texts_mut();
+        texts.begin_step();
+        let mut updates: Vec<(String, Vec<u8>)> = Vec::new();
+        for (pid, text, objects) in &paras {
+            if let Some(u) = texts.sync_objects(&pid.to_string(), text, objects) {
+                updates.push((pid.to_string(), u));
+            }
+        }
+        for (key, value) in &records {
+            if let Some(u) = texts.register_set(key, value) {
+                updates.push((String::new(), u));
+            }
+        }
+        texts.end_step();
+        texts.register_changed();
+        for (para, u) in updates {
+            c.shared.send_text(para, u, None);
+        }
+        true
+    }
+
+    /// Puts the travelling objects the shared text holds for paragraph `pid`
+    /// in place: each object character with a payload gets that object. A
+    /// bare one (text from before objects travelled) keeps the object it has.
+    fn collab_sync_objects(&mut self, pid: u64) {
+        let Some(c) = self.collab.as_ref() else { return };
+        let held = c.shared.texts().objects(&pid.to_string());
+        if held.is_empty() {
+            return;
+        }
+        let Some((story, path)) = self.doc.paragraph_by_pid(pid) else { return };
+        let Ok(p) = self.doc.para_mut(story, &path) else { return };
+        let mut changed = false;
+        for (off, payload) in held {
+            if let Ok(o) = serde_json::from_str::<InlineObject>(&payload)
+                && travels(&o)
+            {
+                changed |= p.set_object(off as usize, o);
+            }
+        }
+        if changed {
+            self.touch();
+        }
+    }
+
+    /// Brings the comments to what their register entries say, for every
+    /// entry that changed (a peer's comment, reply, resolve, edit or delete,
+    /// or an undo).
+    pub(crate) fn collab_follow_comments(&mut self) {
+        let Some(c) = self.collab.as_mut() else { return };
+        let keys = c.shared.texts_mut().register_changed();
+        let entries: Vec<(u64, Option<String>)> =
+            keys.iter().filter_map(|k| Some((k.strip_prefix("m/")?.parse::<u64>().ok()?, c.shared.texts().register_get(k)))).collect();
+        for (id, value) in entries {
+            let record = value.filter(|v| !v.is_empty()).and_then(|v| serde_json::from_str::<Value>(&v).ok());
+            let Some(r) = record else {
+                if let Some(old) = self.doc.comments.remove(&id) {
+                    self.doc.parts.remove(&old.part);
+                    self.touch();
+                }
+                continue;
+            };
+            let field = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+            let text = field("text");
+            let blocks: wordcraft_doc::Blocks =
+                text.split('\n').map(|l| wordcraft_doc::para_block(wordcraft_doc::Paragraph::with_text(l, Default::default()))).collect();
+            let part = match self.doc.comments.get(&id).map(|old| old.part) {
+                Some(part) => {
+                    if self.doc.plain_text(wordcraft_doc::StoryRef::Part(part)) != text {
+                        let _ = self.doc.set_story(wordcraft_doc::StoryRef::Part(part), blocks);
+                    }
+                    part
+                }
+                None => self.doc.add_part(wordcraft_doc::PartKind::Comment, blocks),
+            };
+            let comment = wordcraft_doc::Comment {
+                author: field("author"),
+                initials: field("initials"),
+                date: field("date"),
+                parent: r.get("parent").and_then(Value::as_u64),
+                resolved: r.get("resolved").and_then(Value::as_bool).unwrap_or(false),
+                part,
+            };
+            if self.doc.comments.get(&id) != Some(&comment) {
+                self.doc.comments.insert(id, comment);
+                self.touch();
+            }
+        }
     }
 
     /// The peers to draw, their cursors resolved to positions where known.
@@ -751,6 +923,7 @@ impl Session {
             if self.doc.splice_paragraph_text(pid, &p.text, carried).is_some_and(|(_, _, _, r, i)| r + i > 0) {
                 self.touch();
             }
+            self.collab_sync_objects(pid);
             self.collab_sync_bold(pid);
         }
     }
@@ -789,6 +962,7 @@ impl Session {
                     self.touch();
                 }
             }
+            self.collab_sync_objects(pid);
             self.collab_sync_bold(pid);
         }
     }
@@ -847,6 +1021,7 @@ impl Session {
 /// bold, not the collab/debug/UI/file/tools/selection commands).
 pub(crate) fn replayable_command(id: &str) -> bool {
     !(matches!(id, "edit.undo" | "edit.redo" | "edit.repeat" | "text.insert" | "format.bold")
+        || shared_as_data(id)
         || id.starts_with("collab.")
         || id.starts_with("caret.")
         || id.starts_with("select.")
@@ -854,6 +1029,51 @@ pub(crate) fn replayable_command(id: &str) -> bool {
         || id.starts_with("ui.")
         || id.starts_with("file.")
         || id.starts_with("tools."))
+}
+
+/// Whether an inline object travels in the shared text (see the module
+/// docs). Objects that don't are still replayed with the command that made
+/// them; bookmarks and fields join here when their commands stop replaying.
+pub(crate) fn travels(o: &InlineObject) -> bool {
+    matches!(o, InlineObject::CommentStart { .. } | InlineObject::CommentEnd { .. })
+}
+
+/// The commands whose whole effect is shared as text with objects and
+/// register entries: never replayed.
+fn shared_as_data(id: &str) -> bool {
+    matches!(id, "review.newComment" | "review.reply" | "review.editComment" | "review.deleteComment" | "review.resolveComment")
+}
+
+/// A paragraph's travelling objects as the shared text holds them: byte
+/// offset and the object as JSON.
+fn travelling_objects(p: &wordcraft_doc::Paragraph) -> Vec<(u32, String)> {
+    p.object_offsets()
+        .into_iter()
+        .filter_map(|off| {
+            let o = p.object_at(off).filter(|o| travels(o))?;
+            Some((off as u32, serde_json::to_string(o).ok()?))
+        })
+        .collect()
+}
+
+fn comment_key(id: u64) -> String {
+    format!("m/{id}")
+}
+
+/// A comment as its register entry holds it: its fields and its text.
+fn comment_record(doc: &Document, c: &wordcraft_doc::Comment) -> String {
+    json!({"author": c.author, "initials": c.initials, "date": c.date, "parent": c.parent, "resolved": c.resolved, "text": doc.plain_text(wordcraft_doc::StoryRef::Part(c.part))})
+        .to_string()
+}
+
+/// Every paragraph of the body, tables included, by id.
+fn paragraphs_by_pid(doc: &Document) -> HashMap<u64, wordcraft_doc::Paragraph> {
+    doc.para_paths(wordcraft_doc::StoryRef::Body)
+        .iter()
+        .filter_map(|path| doc.para(wordcraft_doc::StoryRef::Body, path))
+        .filter(|p| p.pid != 0)
+        .map(|p| (p.pid, p.clone()))
+        .collect()
 }
 
 /// Decodes an app cursor (`{"pid": n, "off": n}`) into a position in `doc`.
@@ -1957,6 +2177,145 @@ mod tests {
 
     fn caret(s: &mut Session, path: usize, off: usize) {
         s.run("caret.set", &json!({"pos": {"story": "body", "path": [path], "off": off}})).expect("caret");
+    }
+
+    /// The comments as every replica must agree on them: by id, author, parent, resolved, text
+    /// and where each is anchored.
+    fn comments(s: &mut Session) -> Value {
+        s.run("review.comments", &json!({})).expect("comments")
+    }
+
+    fn select(s: &mut Session, from: usize, to: usize) {
+        s.run("select.range", &json!({"anchor": {"block": 0, "off": from}, "focus": {"block": 0, "off": to}})).expect("select");
+    }
+
+    /// Alice and Bob with "Quarterly plan" typed and shared.
+    fn two_authors_with_text() -> (Session, Session) {
+        let (mut a, mut b) = two_authors();
+        a.run("text.insert", &json!({"text": "Quarterly plan"})).expect("type");
+        settle(&mut a, &mut b);
+        (a, b)
+    }
+
+    #[test]
+    fn two_comments_at_once_keep_their_ids_and_authors_everywhere() {
+        let (mut a, mut b) = two_authors_with_text();
+        select(&mut a, 0, 4);
+        select(&mut b, 10, 14);
+        a.run("review.newComment", &json!({"text": "from Alice"})).expect("comment");
+        b.run("review.newComment", &json!({"text": "from Bob"})).expect("comment");
+        settle(&mut a, &mut b);
+        let (ca, cb) = (comments(&mut a), comments(&mut b));
+        assert_eq!(ca, cb, "every replica holds the same comments under the same ids");
+        let by: Vec<(String, String)> =
+            ca.as_array().unwrap().iter().map(|c| (c["author"].as_str().unwrap().into(), c["text"].as_str().unwrap().into())).collect();
+        assert!(by.contains(&("Alice".into(), "from Alice".into())) && by.contains(&("Bob".into(), "from Bob".into())), "{by:?}");
+        assert_eq!(paras(&a), paras(&b));
+    }
+
+    #[test]
+    fn a_reply_and_a_resolve_at_once_both_land_on_the_same_comment() {
+        let (mut a, mut b) = two_authors_with_text();
+        select(&mut b, 0, 9);
+        let id = b.run("review.newComment", &json!({"text": "Bob asks"})).expect("comment")["id"].as_u64().unwrap();
+        settle(&mut a, &mut b);
+        a.run("review.reply", &json!({"id": id, "text": "Alice answers"})).expect("reply");
+        b.run("review.resolveComment", &json!({"id": id, "value": true})).expect("resolve");
+        settle(&mut a, &mut b);
+        let (ca, cb) = (comments(&mut a), comments(&mut b));
+        assert_eq!(ca, cb);
+        let list = ca.as_array().unwrap();
+        let thread = list.iter().find(|c| c["id"] == id).unwrap();
+        assert_eq!(thread["resolved"], true);
+        let reply = list.iter().find(|c| c["parent"] == id).unwrap();
+        assert_eq!((reply["author"].as_str(), reply["text"].as_str()), (Some("Alice"), Some("Alice answers")));
+    }
+
+    #[test]
+    fn two_replies_at_once_are_both_kept() {
+        let (mut a, mut b) = two_authors_with_text();
+        select(&mut a, 0, 9);
+        let id = a.run("review.newComment", &json!({"text": "Thoughts?"})).expect("comment")["id"].as_u64().unwrap();
+        settle(&mut a, &mut b);
+        a.run("review.reply", &json!({"id": id, "text": "Alice adds"})).expect("reply");
+        b.run("review.reply", &json!({"id": id, "text": "Bob adds"})).expect("reply");
+        settle(&mut a, &mut b);
+        let (ca, cb) = (comments(&mut a), comments(&mut b));
+        assert_eq!(ca, cb);
+        assert_eq!(ca.as_array().unwrap().iter().filter(|c| c["parent"] == id).count(), 2, "{ca}");
+    }
+
+    #[test]
+    fn a_comment_made_while_shared_carries_an_author_scoped_id() {
+        let (mut a, mut b) = two_authors_with_text();
+        select(&mut a, 0, 4);
+        let id = a.run("review.newComment", &json!({"text": "mine"})).expect("comment")["id"].as_u64().unwrap();
+        assert!(id >> 32 != 0, "author-scoped: {id:#x}");
+        settle(&mut a, &mut b);
+        assert!(b.doc.comments.contains_key(&id), "the same id on the other replica");
+    }
+
+    #[test]
+    fn typing_inside_a_selection_as_it_is_commented_stays_inside() {
+        let (mut a, mut b) = two_authors_with_text();
+        select(&mut a, 0, 9);
+        caret(&mut b, 0, 3);
+        a.run("review.newComment", &json!({"text": "on Quarterly"})).expect("comment");
+        b.run("text.insert", &json!({"text": "XYZ"})).expect("type");
+        settle(&mut a, &mut b);
+        assert_eq!(paras(&a), paras(&b));
+        assert_eq!(comments(&mut a), comments(&mut b));
+        let a_doc = a.doc.para(StoryRef::Body, &wordcraft_doc::Path::top(0)).unwrap().clone();
+        let start = a_doc.text.find(wordcraft_doc::para::OBJ).unwrap();
+        let end = a_doc.text.rfind(wordcraft_doc::para::OBJ).unwrap();
+        let x = a_doc.text.find("XYZ").unwrap();
+        assert!(start < x && x < end, "the typed text is inside the comment: {:?}", a_doc.text);
+    }
+
+    #[test]
+    fn deleting_editing_and_undoing_comments_travel() {
+        let (mut a, mut b) = two_authors_with_text();
+        select(&mut a, 0, 4);
+        let first = a.run("review.newComment", &json!({"text": "first"})).expect("comment")["id"].as_u64().unwrap();
+        settle(&mut a, &mut b);
+        b.run("review.editComment", &json!({"id": first, "text": "first, edited by Bob"})).expect("edit");
+        settle(&mut a, &mut b);
+        assert_eq!(comments(&mut a)[0]["text"], "first, edited by Bob");
+        select(&mut a, 10, 14);
+        a.run("review.newComment", &json!({"text": "second"})).expect("comment");
+        settle(&mut a, &mut b);
+        a.run("edit.undo", &json!({})).expect("undo");
+        settle(&mut a, &mut b);
+        assert_eq!(comments(&mut a), comments(&mut b));
+        assert_eq!(comments(&mut b).as_array().unwrap().len(), 1, "the undo took the second comment back everywhere");
+        b.run("review.deleteComment", &json!({"id": first})).expect("delete");
+        settle(&mut a, &mut b);
+        assert_eq!(comments(&mut a), json!([]), "the delete travelled");
+        assert_eq!(paras(&a), paras(&b));
+        assert_eq!(paras(&a), vec!["Quarterly plan"], "no anchor left behind");
+    }
+
+    #[test]
+    fn a_comment_from_before_sharing_takes_replies_and_survives_typing() {
+        let mut a = session();
+        a.run("text.insert", &json!({"text": "Quarterly plan"})).expect("type");
+        a.run("select.range", &json!({"anchor": {"block": 0, "off": 0}, "focus": {"block": 0, "off": 9}})).expect("select");
+        let id = a.run("review.newComment", &json!({"text": "written alone"})).expect("comment")["id"].as_u64().unwrap();
+        let (ta, tb) = MemoryTransport::pair("aaaaaaaa", "bbbbbbbb");
+        let mut b = session();
+        a.collab_attach("demo", "Alice", Box::new(ta));
+        b.collab_join("demo", "Bob", Box::new(tb));
+        settle(&mut a, &mut b);
+        b.run("review.reply", &json!({"id": id, "text": "seen"})).expect("reply");
+        a.run("review.resolveComment", &json!({"id": id, "value": true})).expect("resolve");
+        caret(&mut b, 0, 5);
+        b.run("text.insert", &json!({"text": "!"})).expect("type");
+        settle(&mut a, &mut b);
+        assert_eq!(comments(&mut a), comments(&mut b));
+        assert_eq!(paras(&a), paras(&b));
+        let list = comments(&mut a);
+        assert_eq!(list.as_array().unwrap().len(), 2, "{list}");
+        assert!(list.as_array().unwrap().iter().any(|c| c["id"] == id && c["resolved"] == true));
     }
 
     #[test]

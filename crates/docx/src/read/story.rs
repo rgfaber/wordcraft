@@ -321,7 +321,7 @@ impl Reader<'_> {
         }
     }
 
-    fn comment_id(&self, file_id: &str) -> Option<u32> {
+    fn comment_id(&self, file_id: &str) -> Option<u64> {
         self.comment_map.get(file_id).copied()
     }
 

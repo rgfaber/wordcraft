@@ -372,7 +372,7 @@ fn comments(app: &mut WordApp, ui: &mut Ui) {
                     }
                 });
                 // Editable comment text (one undo step per edit, like the balloons).
-                comment_editor(app, ui, id as u32, None, false);
+                comment_editor(app, ui, id, None, false);
                 let open_key = egui::Id::new(("comment_reply_open", id));
                 let mut replying = ui.data(|d| d.get_temp::<bool>(open_key)).unwrap_or(false);
                 ui.horizontal(|ui| {
@@ -396,7 +396,7 @@ fn comments(app: &mut WordApp, ui: &mut Ui) {
                 });
                 if replying {
                     let focus = ui.data_mut(|d| d.remove_temp::<bool>(egui::Id::new(("comment_reply_focus", id)))).unwrap_or(false);
-                    if reply_editor(app, ui, id as u32, None, focus) {
+                    if reply_editor(app, ui, id, None, focus) {
                         ui.data_mut(|d| d.remove::<bool>(open_key));
                     }
                 }
@@ -406,18 +406,18 @@ fn comments(app: &mut WordApp, ui: &mut Ui) {
     });
 }
 
-fn edit_key(id: u32) -> egui::Id {
+fn edit_key(id: u64) -> egui::Id {
     egui::Id::new(("comment_edit", id))
 }
 
-fn reply_key(id: u32) -> egui::Id {
+fn reply_key(id: u64) -> egui::Id {
     egui::Id::new(("comment_reply", id))
 }
 
 /// A comment's text, editable in place (the Comments pane and the balloons). Typing stays in a
 /// draft until the field loses focus; then [`commit_comment`] writes it back with one
 /// `review.editComment`, so each editing session is one undo step.
-pub(crate) fn comment_editor(app: &mut WordApp, ui: &mut Ui, id: u32, font: Option<egui::FontId>, focus: bool) {
+pub(crate) fn comment_editor(app: &mut WordApp, ui: &mut Ui, id: u64, font: Option<egui::FontId>, focus: bool) {
     let Some(part) = app.session.doc.comments.get(&id).map(|c| c.part) else { return };
     let key = edit_key(id);
     let mut text = ui.data(|d| d.get_temp::<String>(key)).unwrap_or_else(|| app.session.doc.plain_text(StoryRef::Part(part)));
@@ -438,7 +438,7 @@ pub(crate) fn comment_editor(app: &mut WordApp, ui: &mut Ui, id: u32, font: Opti
 }
 
 /// Write a comment's draft text back, when it has one that differs from the comment.
-pub(crate) fn commit_comment(app: &mut WordApp, ctx: &egui::Context, id: u32) {
+pub(crate) fn commit_comment(app: &mut WordApp, ctx: &egui::Context, id: u64) {
     let Some(text) = ctx.data_mut(|d| d.remove_temp::<String>(edit_key(id))) else { return };
     let Some(part) = app.session.doc.comments.get(&id).map(|c| c.part) else { return };
     if text != app.session.doc.plain_text(StoryRef::Part(part)) {
@@ -447,7 +447,7 @@ pub(crate) fn commit_comment(app: &mut WordApp, ctx: &egui::Context, id: u32) {
 }
 
 /// The comment a reply to `id` answers: replies to a reply join its thread.
-fn thread_root(app: &WordApp, id: u32) -> u32 {
+fn thread_root(app: &WordApp, id: u64) -> u64 {
     match app.session.doc.comments.get(&id).and_then(|c| c.parent) {
         Some(p) if app.session.doc.comments.contains_key(&p) => p,
         _ => id,
@@ -456,7 +456,7 @@ fn thread_root(app: &WordApp, id: u32) -> u32 {
 
 /// A field for replying to a comment. When it loses focus a non-empty reply is posted with
 /// `review.reply`; returns true when the field is done (posted or left empty).
-pub(crate) fn reply_editor(app: &mut WordApp, ui: &mut Ui, id: u32, font: Option<egui::FontId>, focus: bool) -> bool {
+pub(crate) fn reply_editor(app: &mut WordApp, ui: &mut Ui, id: u64, font: Option<egui::FontId>, focus: bool) -> bool {
     let key = reply_key(id);
     let mut text = ui.data(|d| d.get_temp::<String>(key)).unwrap_or_default();
     let mut edit = egui::TextEdit::multiline(&mut text).desired_rows(1).desired_width(f32::INFINITY).hint_text(tl!("Write a reply"));
@@ -478,7 +478,7 @@ pub(crate) fn reply_editor(app: &mut WordApp, ui: &mut Ui, id: u32, font: Option
 }
 
 /// Post a pending reply draft to comment `id` (nothing when there is none or it is blank).
-pub(crate) fn commit_reply(app: &mut WordApp, ctx: &egui::Context, id: u32) {
+pub(crate) fn commit_reply(app: &mut WordApp, ctx: &egui::Context, id: u64) {
     let Some(text) = ctx.data_mut(|d| d.remove_temp::<String>(reply_key(id))) else { return };
     if !text.trim().is_empty() {
         let root = thread_root(app, id);

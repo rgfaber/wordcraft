@@ -501,10 +501,10 @@ pub enum InlineObject {
         name: String,
     },
     CommentStart {
-        id: u32,
+        id: u64,
     },
     CommentEnd {
-        id: u32,
+        id: u64,
     },
     /// The start of a range that stays editable while the document is protected (Restrict
     /// Editing exceptions, `w:permStart`): for everyone (`group` = `everyone`), another editing
@@ -584,6 +584,12 @@ pub struct CanvasStyle {
 }
 
 impl InlineObject {
+    /// An inert object: the stand-in for an object character whose object isn't known yet. It
+    /// writes nothing to a file.
+    pub fn placeholder() -> InlineObject {
+        InlineObject::Opaque { format: String::new(), xml: String::new(), text: String::new() }
+    }
+
     /// A picture, chart or diagram, shape, text box or group: something drawn with a frame, sized and wrapped.
     pub fn is_drawing(&self) -> bool {
         matches!(self, InlineObject::Image { .. } | InlineObject::Graphic { .. } | InlineObject::Shape { .. } | InlineObject::Group { .. })
@@ -953,6 +959,18 @@ impl Paragraph {
     /// Number of objects in `text[..off]`.
     fn objects_before(&self, off: usize) -> usize {
         self.text.get(..off).map(|t| t.chars().filter(|c| *c == OBJ).count()).unwrap_or(0)
+    }
+
+    /// Replaces the object at byte `off` (which must hold U+FFFC); false when there is none.
+    pub fn set_object(&mut self, off: usize, obj: InlineObject) -> bool {
+        match self.object_at_mut(off) {
+            Some(o) if *o != obj => {
+                *o = obj;
+                self.touch();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The object at byte `off` (which must hold U+FFFC).

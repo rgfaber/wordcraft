@@ -1612,7 +1612,7 @@ fn comments() {
     assert_eq!(run(&mut s, "review.comments", json!({}))[0]["text"], "Nice");
     assert!(s.run("review.editComment", &json!({"id": 999, "text": "x"})).is_err());
     let r = run(&mut s, "review.reply", json!({"id": id, "text": "Agreed"}));
-    assert_eq!(s.doc.comments.get(&(r["id"].as_u64().unwrap() as u32)).unwrap().parent, Some(id as u32));
+    assert_eq!(s.doc.comments.get(&r["id"].as_u64().unwrap()).unwrap().parent, Some(id));
     run(&mut s, "review.deleteComment", json!({"id": id}));
     assert!(s.doc.comments.is_empty());
     assert_eq!(s.doc.para_at(&Pos::body(0, 0)).unwrap().objects.len(), 0);

@@ -133,6 +133,17 @@ pub(crate) fn write_parts(doc: &Document, flavor: Flavor) -> Result<Vec<(String,
     } else {
         doc
     };
+    // Comment ids go out as 32-bit `w:id`s: a co-authored document's author-scoped ids are
+    // renumbered in the copy that is written.
+    let compacted;
+    let doc = if doc.comments.keys().any(|id| *id > u64::from(i32::MAX as u32)) {
+        let mut d = doc.clone();
+        d.compact_comment_ids();
+        compacted = d;
+        &compacted
+    } else {
+        doc
+    };
     let mut wr = Writer {
         eq_number: 0,
         doc,
@@ -173,7 +184,7 @@ pub(crate) fn write_parts(doc: &Document, flavor: Flavor) -> Result<Vec<(String,
     let mut root = PartRels::default();
 
     // Comments get paragraph ids before any story is written.
-    let mut comment_paras: Vec<(u32, String)> = Vec::new();
+    let mut comment_paras: Vec<(u64, String)> = Vec::new();
     for (i, (cid, c)) in doc.comments.iter().enumerate() {
         if let Some(part) = doc.parts.get(&c.part)
             && let Some(last) = part.blocks.iter().rev().find_map(|b| b.as_para())
@@ -318,7 +329,7 @@ pub(crate) fn write_parts(doc: &Document, flavor: Flavor) -> Result<Vec<(String,
                 ("xmlns:mc", "http://schemas.openxmlformats.org/markup-compatibility/2006"),
             ],
         );
-        let pid_of = |cid: u32| comment_paras.iter().find(|(c, _)| *c == cid).map(|(_, p)| p.clone());
+        let pid_of = |cid: u64| comment_paras.iter().find(|(c, _)| *c == cid).map(|(_, p)| p.clone());
         for (cid, c) in &doc.comments {
             let Some(pid) = pid_of(*cid) else { continue };
             let done = if c.resolved { "1" } else { "0" };

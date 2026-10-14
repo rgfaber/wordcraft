@@ -3376,7 +3376,7 @@ fn footnote_longer_than_pages_ends() {
 }
 
 /// A comment by `author` saying `text` on body paragraph `para`, bytes `a..b`; its id.
-fn comment_on(d: &mut Document, para: usize, a: usize, b: usize, author: &str, text: &str, parent: Option<u32>) -> u32 {
+fn comment_on(d: &mut Document, para: usize, a: usize, b: usize, author: &str, text: &str, parent: Option<u64>) -> u64 {
     let part = d.add_part(wordcraft_doc::PartKind::Comment, vec![wordcraft_doc::para_block(Paragraph::with_text(text, CharProps::default()))]);
     let id = d.comments.keys().next_back().map_or(0, |k| k + 1);
     d.comments.insert(id, wordcraft_doc::Comment { author: author.into(), part, parent, ..Default::default() });

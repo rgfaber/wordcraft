@@ -56,7 +56,7 @@ struct Card {
 }
 
 /// The thread a comment belongs to: the comment at the top of its parent chain.
-fn root(doc: &Document, id: u32) -> u32 {
+fn root(doc: &Document, id: u64) -> u64 {
     let mut cur = id;
     for _ in 0..MAX_PARENT_CHAIN {
         match doc.comments.get(&cur).and_then(|c| c.parent) {
@@ -69,7 +69,7 @@ fn root(doc: &Document, id: u32) -> u32 {
 
 /// Each top-level comment anchored in the body, with where it starts, in document order. Replies
 /// have no balloon of their own: they go under the comment they answer.
-pub fn anchors(doc: &Document) -> Vec<(u32, Pos)> {
+pub fn anchors(doc: &Document) -> Vec<(u64, Pos)> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for path in doc.para_paths(StoryRef::Body) {
@@ -89,8 +89,8 @@ pub fn anchors(doc: &Document) -> Vec<(u32, Pos)> {
 }
 
 /// Replies by the top-level comment they belong to, oldest (lowest id) first.
-pub fn replies(doc: &Document) -> BTreeMap<u32, Vec<u32>> {
-    let mut m: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+pub fn replies(doc: &Document) -> BTreeMap<u64, Vec<u64>> {
+    let mut m: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for id in doc.comments.keys() {
         let r = root(doc, *id);
         if r != *id {

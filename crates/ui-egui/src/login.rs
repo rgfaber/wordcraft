@@ -155,13 +155,13 @@ fn sign_in_section(app: &mut WordApp, ui: &mut egui::Ui, ctx: &Context) {
     }
 }
 
-/// Draws the link's QR (the shared craft-qr matrix; the drawing is per
+/// Draws the link's QR (the qr module's matrix; the drawing is per
 /// app): white ground, black modules, a four-module quiet zone, scaled to
 /// fit the window.
 fn qr_image(ui: &mut egui::Ui, link: &str) {
     const SIZE: f32 = 208.0;
     const QUIET: usize = 4;
-    match craft_qr::matrix(link) {
+    match crate::qr::matrix(link) {
         Ok(matrix) => {
             let total = (matrix.width + 2 * QUIET) as f32;
             let cell = SIZE / total;

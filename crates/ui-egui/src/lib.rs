@@ -25,6 +25,7 @@ pub mod keys;
 pub mod login;
 pub mod panes;
 pub mod previews;
+pub mod qr;
 pub mod ribbon;
 pub mod share;
 pub mod theme;

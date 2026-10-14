@@ -913,6 +913,8 @@ def main():
     parser.add_argument("--record", default=None, help="write a short 16:9 mp4 of the story (window-frame triptych) to this path")
     parser.add_argument("--screen-record", default=None, help="record the demo windows with wf-recorder (a true screen capture) to this mp4")
     args = parser.parse_args()
+    if not args.stations.strip():
+        parser.error("no stations: set MACULA_STATIONS (host:port:node_hex, comma-separated) or pass --stations")
 
     args.stations = [s for s in args.stations.split(",") if s]
     args.ports = [int(p) for p in args.ports.split(",")]

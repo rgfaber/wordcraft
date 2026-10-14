@@ -1074,6 +1074,10 @@ impl Session {
             // Go Back's places, like the caret history: not part of the document.
             edit_marks: _,
             go_back_step: _,
+            // The collaboration link and realm sign-in, like the file path: host wiring. A restore
+            // is not sent to co-authors, so restoring while shared leaves their copies as they are.
+            collab: _,
+            realm: _,
         } = self;
         let head = if history.len() + SNAPSHOT_HEAD > MAX_UNDO { history.iter().take(SNAPSHOT_HEAD).cloned().collect() } else { Vec::new() };
         EditSnapshot {

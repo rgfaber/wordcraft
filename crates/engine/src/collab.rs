@@ -255,7 +255,7 @@ impl Session {
         if let Some(c) = self.collab.as_mut() {
             c.grants_path = Some(std::path::PathBuf::from(path));
         }
-        let Ok(text) = std::fs::read_to_string(path) else { return };
+        let Some(text) = read_app_file(path) else { return };
         let Ok(grants) = serde_json::from_str::<Vec<craft_collab::SignedGrant>>(&text) else { return };
         if let Some(c) = self.collab.as_mut()
             && let Some(access) = c.access.as_mut()
@@ -273,7 +273,7 @@ impl Session {
         let Some(access) = c.access.as_ref() else { return };
         let grants = access.signed_grants();
         if let Ok(json) = serde_json::to_string(&grants) {
-            let _ = std::fs::write(path, json);
+            write_app_file(path, json.as_bytes());
         }
     }
 
@@ -282,7 +282,7 @@ impl Session {
     /// it met. Malformed entries are skipped; persistence never takes the
     /// collaboration down.
     pub fn collab_set_contacts_path(&mut self, path: &str) {
-        if let Ok(text) = std::fs::read_to_string(path) {
+        if let Some(text) = read_app_file(path) {
             let contacts = craft_collab::Contacts::from_json(&text);
             if let Some(c) = self.collab.as_mut() {
                 c.contacts = contacts;
@@ -321,7 +321,7 @@ impl Session {
     fn collab_save_contacts(&self) {
         let Some(c) = self.collab.as_ref() else { return };
         let Some(path) = c.contacts_path.as_ref() else { return };
-        let _ = std::fs::write(path, c.contacts.to_json());
+        write_app_file(path, c.contacts.to_json().as_bytes());
     }
 
     /// Stores the realm membership status the app read for this session's
@@ -1426,6 +1426,21 @@ pub(crate) fn shifted_off(off: usize, pre: usize, removed: usize, inserted: usiz
     }
 }
 
+/// Reads one of the app's own collaboration files (grants, contacts). They are the app's
+/// folders, not a command's, so automation roots don't apply ([`crate::file_access::unconfined`]).
+fn read_app_file(path: &str) -> Option<String> {
+    crate::file_access::unconfined(|| crate::io::read_file(path)).ok().and_then(|b| String::from_utf8(b).ok())
+}
+
+/// Writes one of the app's own collaboration files; a failed write never takes the
+/// collaboration down.
+fn write_app_file(path: &std::path::Path, bytes: &[u8]) {
+    let path = path.to_string_lossy();
+    if let Err(e) = crate::file_access::unconfined(|| crate::io::write_file(&path, bytes)) {
+        log::warn!("collab: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2464,12 +2479,14 @@ mod tests {
         a.run("text.newParagraph", &json!({})).expect("enter");
         a.run("text.insert", &json!({"text": "two"})).expect("type");
         settle(&mut a, &mut b);
-        assert_eq!(paras(&b), vec!["one", "two"]);
+        // AutoCorrect capitalizes the first word on A; the corrected text is what travels.
+        assert_eq!(paras(&a), vec!["One", "two"]);
+        assert_eq!(paras(&b), paras(&a));
         caret(&mut b, 1, 0);
         b.run("text.backspace", &json!({})).expect("backspace at the paragraph start");
         settle(&mut a, &mut b);
 
-        assert_eq!(paras(&a), vec!["onetwo"], "the join reached A");
+        assert_eq!(paras(&a), vec!["Onetwo"], "the join reached A");
         b.run("text.insert", &json!({"text": " and three"})).expect("B types on");
         settle(&mut a, &mut b);
         assert_eq!(paras(&a), paras(&b));

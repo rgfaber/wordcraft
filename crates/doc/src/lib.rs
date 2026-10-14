@@ -845,6 +845,8 @@ impl Document {
             let mut props = p.props_of_char(a).clone();
             let bold = spans.iter().any(|(s, e)| a >= *s as usize && a < *e as usize);
             props.bold = if bold { Some(true) } else { None };
+            // Bold covers complex-script text too, as Home › Bold does.
+            props.bold_cs = props.bold;
             if let Some(last) = out.last_mut()
                 && last.props == props
             {

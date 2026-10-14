@@ -17,7 +17,7 @@ wordcraft-render = { workspace = true }
 wordcraft-engine = { workspace = true }
 wordcraft-zotero = { workspace = true }
 craft-collab = { workspace = true }
-qrcode = { version = "0.14", default-features = false }
+craft-share = { workspace = true }
 egui = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -40,7 +40,6 @@ js-sys = "0.3"
 
 [dev-dependencies]
 # a real decoder, so the QR tests prove the symbol reads back
-rqrr = "0.9"
 egui_kittest = { workspace = true, features = ["wgpu", "snapshot"] }
 zip = { workspace = true }
 

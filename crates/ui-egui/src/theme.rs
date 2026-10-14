@@ -771,11 +771,9 @@ mod tests {
         // Equation gallery templates are UnicodeMath input (`lim┬(n→∞)`, `≜`) that the math
         // renderer draws with document fonts, not interface text.
         // The ➢ bullet is a value for `para.bullets`; its menu tile draws the shape instead.
-        // The QR code's text form (`██` per dark module) is for terminals; the window draws it.
         let exempt = |c: char, file: &str| match file {
             "equation_tab.rs" => matches!(c, '≜' | '┬'),
             "ribbon.rs" => c == '➢',
-            "qr.rs" => c == '█',
             _ => false,
         };
         symbols.retain(|(c, file)| !exempt(*c, file));

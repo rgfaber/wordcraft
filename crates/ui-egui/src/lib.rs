@@ -56,7 +56,6 @@ pub mod icons;
 pub mod ink;
 pub mod keys;
 pub mod keytips;
-pub mod login;
 pub mod mini_toolbar;
 pub mod objects;
 pub mod options;
@@ -64,11 +63,10 @@ pub mod panes;
 pub mod paste_picture;
 pub mod previews;
 pub mod print_page;
-pub mod qr;
 pub mod read_aloud;
 pub mod ribbon;
 pub mod scroll;
-pub mod share;
+mod share_host;
 pub mod system_clipboard;
 pub mod table_mouse;
 pub mod table_pen;
@@ -366,8 +364,8 @@ pub struct WordApp {
     pub colors: Option<colors::ColorsDialog>,
     /// The Restrict Editing pane (#412).
     pub restrict: dialogs_review::RestrictPane,
-    pub share: share::ShareState,
-    pub login: login::LoginState,
+    pub share: craft_share::ShareState,
+    pub login: craft_share::LoginState,
     pub status_msg: Option<(String, f64)>,
     pub previews: previews::Previews,
     /// Media key of the picture a pending Change Picture replaces (#147).
@@ -484,8 +482,8 @@ impl WordApp {
             dialog: None,
             colors: None,
             restrict: Default::default(),
-            share: share::ShareState::default(),
-            login: login::LoginState::default(),
+            share: craft_share::ShareState::default(),
+            login: craft_share::LoginState::default(),
             status_msg: None,
             previews: previews::Previews::default(),
             integrated_titlebar: false,
@@ -1637,8 +1635,7 @@ impl WordApp {
         zotero::show_alert(self, &ctx);
         read_aloud::show(self, &ctx);
         crate::keytips::show(self, &ctx, ui);
-        share::show(self, &ctx);
-        login::show(self, &ctx);
+        share_host::show(self, &ctx);
         keys::global_shortcuts(self, &ctx);
         if let Some(url) = self.canvas.open_url.take() {
             ctx.open_url(egui::OpenUrl::new_tab(url));

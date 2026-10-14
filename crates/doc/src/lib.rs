@@ -738,15 +738,24 @@ impl Document {
     /// inherits what typing at the splice point would. Whether the
     /// paragraph was found.
     pub fn apply_paragraph_text(&mut self, pid: u64, text: &str, inserted_props: Option<&CharProps>) -> bool {
-        let Some((story, path)) = self.paragraph_by_pid(pid) else {
-            return false;
-        };
-        let Ok(p) = self.para_mut(story, &path) else {
-            return false;
-        };
+        self.splice_paragraph_text(pid, text, inserted_props).is_some()
+    }
+
+    /// [`Document::apply_paragraph_text`], returning where the paragraph is
+    /// and what changed: `(story, path, pre, removed, inserted)` in bytes,
+    /// so a caller can carry its own positions in that paragraph across the
+    /// change. `None` when the paragraph was not found.
+    pub fn splice_paragraph_text(
+        &mut self,
+        pid: u64,
+        text: &str,
+        inserted_props: Option<&CharProps>,
+    ) -> Option<(StoryRef, Path, usize, usize, usize)> {
+        let (story, path) = self.paragraph_by_pid(pid)?;
+        let p = self.para_mut(story, &path).ok()?;
         let (pre, removed, inserted) = splice(&p.text, text);
         if removed == 0 && inserted == 0 {
-            return true;
+            return Some((story, path, pre, 0, 0));
         }
         let ins_props = inserted_props.cloned().unwrap_or_else(|| p.props_at(pre).clone());
         // Runs before, across and after the changed span; the overlapping
@@ -793,7 +802,7 @@ impl Document {
         p.text = text.to_string();
         p.runs = merged;
         p.touch();
-        true
+        Some((story, path, pre, removed, inserted))
     }
 
     /// Replaces the text of the paragraph with stable id `pid` with the

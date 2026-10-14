@@ -1,0 +1,92 @@
+# The mesh preview build of this fork (packaging/linux/mesh-preview.sh): WordCraft with co-editing
+# over the Macula mesh, under its own identity. A tag mesh-preview-v<version> builds the Linux
+# tarball and .deb and publishes them as a GitHub pre-release here. Linux only for now.
+name: Mesh preview release
+
+on:
+  push:
+    tags: ["mesh-preview-v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  WORDCRAFT_BUILD_SHA: ${{ github.sha }}
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.arch }}
+    # The oldest hosted image, so the binaries need only glibc >= 2.35, as upstream's release.
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-22.04, deb: amd64 }
+          - { arch: aarch64, runner: ubuntu-22.04-arm, deb: arm64 }
+    env:
+      NFPM_VERSION: 2.47.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out craft-fonts
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          repository: storytold/craft-fonts
+          ref: abb83316d96aa59c1cf64784289e378fe9fa5695
+          path: craft-fonts
+      - name: Install build and packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev \
+            desktop-file-utils appstream
+          curl -fsSL -o "$RUNNER_TEMP/nfpm.deb" \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_${{ matrix.deb }}.deb"
+          sudo dpkg -i "$RUNNER_TEMP/nfpm.deb"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Version from the tag
+        run: |
+          v="${GITHUB_REF_NAME#mesh-preview-v}"
+          echo "WORDCRAFT_VERSION=$v" >> "$GITHUB_ENV"
+          echo "WORDCRAFT_BUILD_DATE=$(date -u +%F)" >> "$GITHUB_ENV"
+          cargo xtask version set "$v"
+      - run: cargo test --workspace --locked
+      - name: Build and package (tar.gz, deb)
+        env:
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: "1"
+        run: packaging/linux/mesh-preview.sh --formats "tar deb"
+      - name: Check the packages
+        run: |
+          dpkg-deb --info dist/release/*.deb
+          dpkg-deb --contents dist/release/*.deb | grep -E 'usr/bin/wordcraft-mesh$|io.macula.wordcraft-mesh'
+          ! strings target/release/wordcraft | grep -q "$HOME"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mesh-preview-linux-${{ matrix.arch }}
+          path: dist/release/*
+          if-no-files-found: error
+
+  release:
+    name: GitHub pre-release
+    needs: linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mesh-preview-linux-*
+          merge-multiple: true
+          path: dist
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --prerelease \
+            --title "WordCraft (mesh preview) ${GITHUB_REF_NAME#mesh-preview-v}" \
+            --notes "A preview build of this fork: WordCraft with co-editing over the Macula mesh. Not an upstream WordCraft release. Linux x86_64 and aarch64: a .deb (Debian, Ubuntu) and a tarball. Installs as wordcraft-mesh, beside any upstream WordCraft."

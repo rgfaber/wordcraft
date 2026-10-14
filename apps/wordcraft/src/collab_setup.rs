@@ -77,6 +77,8 @@ struct Config {
 
 #[derive(Deserialize)]
 struct TrustRealm {
+    /// The realm the person means to trust: the descriptor must be for it.
+    name: String,
     descriptor: String,
     fingerprint: String,
 }
@@ -331,8 +333,7 @@ fn trust_realms(path: &std::path::Path, realms: &[TrustRealm]) -> Result<(), Str
     let mut trust = macula_craft_collab::RealmTrust::load(path)?;
     for entry in realms {
         let text = std::fs::read_to_string(&entry.descriptor).map_err(|e| format!("{}: {e}", entry.descriptor))?;
-        let (descriptor, key) = macula_craft_collab::RealmDescriptor::parse(&text)?;
-        trust.trust(&descriptor.realm, &key, &entry.fingerprint)?;
+        trust.trust_descriptor(&entry.name, &text, &entry.fingerprint)?;
     }
     trust.save(path)
 }
@@ -347,14 +348,24 @@ fn share_verifier(
     transport_realm_key: &str,
     trust_path: Option<&std::path::Path>,
 ) -> Result<macula_craft_collab::RealmMemberVerifier, String> {
-    let is_transport_realm = hex_bytes(transport_realm_id).is_ok_and(|id| id == macula_craft_collab::realm::realm_id_of(realm));
-    if is_transport_realm && !transport_realm_key.is_empty() {
-        return Ok(macula_craft_collab::RealmMemberVerifier::new(realm, hex_bytes(transport_realm_key)?, role));
-    }
+    let realm = realm.trim();
     let trust = match trust_path {
         Some(path) => macula_craft_collab::RealmTrust::load(path)?,
         None => macula_craft_collab::RealmTrust::default(),
     };
+    let is_transport_realm = hex_bytes(transport_realm_id).is_ok_and(|id| id == macula_craft_collab::realm::realm_id_of(realm));
+    if is_transport_realm && !transport_realm_key.is_empty() {
+        let key = hex_bytes(transport_realm_key)?;
+        // A checked trust entry for the same realm outranks an unchecked
+        // config key: they must agree, or nothing is shared.
+        if let Some(entry) = trust.entry(realm) {
+            let pinned = macula_craft_collab::realm::trust::fingerprint(&key);
+            if pinned != entry.key_id {
+                return Err(format!("{realm}: the config's key ({pinned}) is not the one you trusted ({}); fix one of them", entry.key_id));
+            }
+        }
+        return Ok(macula_craft_collab::RealmMemberVerifier::new(realm, key, role));
+    }
     trust.verifier(realm, role)
 }
 
@@ -468,20 +479,47 @@ mod tests {
         let other_transport = "cc".repeat(32);
 
         // Not the transport's realm and not trusted: refused, with the fix named.
-        let err = share_verifier("io.macula", craft_collab::Role::Editor, &other_transport, "ee", Some(&trust)).err().expect("refused");
+        let Err(err) = share_verifier("io.macula", craft_collab::Role::Editor, &other_transport, "ee", Some(&trust)) else { panic!("refused") };
         assert!(err.contains("trusted realms"), "{err}");
 
         // A fingerprint that is not the key's: nothing is trusted.
-        let wrong = [TrustRealm { descriptor: descriptor.display().to_string(), fingerprint: "00".repeat(32) }];
+        let wrong = [TrustRealm { name: "io.macula".into(), descriptor: descriptor.display().to_string(), fingerprint: "00".repeat(32) }];
         assert!(trust_realms(&trust, &wrong).is_err());
         assert!(share_verifier("io.macula", craft_collab::Role::Editor, &other_transport, "ee", Some(&trust)).is_err());
 
         // The checked fingerprint: trusted, and the verifier checks that realm.
-        let right = [TrustRealm { descriptor: descriptor.display().to_string(), fingerprint: IO_MACULA_FP.into() }];
+        // A descriptor offered under another name: refused (Fable round 1).
+        let renamed = [TrustRealm { name: "net.beam-campus".into(), descriptor: descriptor.display().to_string(), fingerprint: IO_MACULA_FP.into() }];
+        assert!(trust_realms(&trust, &renamed).is_err(), "the person names the realm, not the descriptor");
+        assert!(share_verifier("net.beam-campus", craft_collab::Role::Editor, &other_transport, "ee", Some(&trust)).is_err());
+
+        let right = [TrustRealm { name: "io.macula".into(), descriptor: descriptor.display().to_string(), fingerprint: IO_MACULA_FP.into() }];
         trust_realms(&trust, &right).expect("trusted");
         let verifier = share_verifier("io.macula", craft_collab::Role::Editor, &other_transport, "ee", Some(&trust)).expect("now trusted");
         assert_eq!(verifier.realm(), "io.macula");
         assert_eq!(verifier.role(), craft_collab::Role::Editor);
+    }
+
+    /// Fable round 1, required 2: an unchecked config key never overrides a
+    /// checked trust entry for the same realm.
+    #[test]
+    fn a_config_key_that_disagrees_with_the_trusted_one_shares_nothing() {
+        let dir = tempfile::tempdir().expect("dir");
+        let trust = dir.path().join("trusted-realms.json");
+        let descriptor = dir.path().join("io.macula.json");
+        std::fs::write(&descriptor, IO_MACULA).expect("descriptor");
+        trust_realms(
+            &trust,
+            &[TrustRealm { name: "io.macula".into(), descriptor: descriptor.display().to_string(), fingerprint: IO_MACULA_FP.into() }],
+        )
+        .expect("trusted");
+        let Err(err) = share_verifier("io.macula", craft_collab::Role::Viewer, IO_MACULA_ID, "ee", Some(&trust)) else {
+            panic!("a config key that is not the trusted one")
+        };
+        assert!(err.contains(IO_MACULA_FP), "{err}");
+        let (_, key) = macula_craft_collab::RealmDescriptor::parse(IO_MACULA).expect("vector");
+        let key_hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+        share_verifier("io.macula", craft_collab::Role::Viewer, IO_MACULA_ID, &key_hex, Some(&trust)).expect("agreeing keys share");
     }
 
     #[test]

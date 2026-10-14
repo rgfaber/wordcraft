@@ -29,6 +29,26 @@ fn short(node: &str) -> String {
     node.chars().take(8).collect()
 }
 
+/// What a pasted invite asks of the joiner, before Join is pressed: who
+/// sent it (and the realm they claim), and for a realm invite which of the
+/// joiner's memberships joining presents. The invite's signature is checked
+/// at Join; this only reads what it says.
+pub(crate) fn invite_preview(line: &str) -> Option<Vec<String>> {
+    let invite = craft_collab::Invite::decode(line.trim()).ok()?;
+    let from = match invite.host_realm.as_deref() {
+        Some(realm) => format!("From {} (says they are in {realm}).", invite.host_name),
+        None => format!("From {}.", invite.host_name),
+    };
+    let mut lines = vec![from];
+    if invite.member_role.is_some() {
+        match invite.member_realm.as_deref() {
+            Some(realm) => lines.push(format!("Joining shows {} your membership of {realm}.", invite.host_name)),
+            None => lines.push("This realm invite names no realm; it cannot admit you.".into()),
+        }
+    }
+    Some(lines)
+}
+
 pub fn show(app: &mut WordApp, ctx: &Context) {
     if !app.share.open {
         return;
@@ -86,6 +106,11 @@ fn join_form(app: &mut WordApp, ui: &mut egui::Ui) {
         }
         ui.add(egui::TextEdit::singleline(&mut app.share.name).desired_width(180.0));
     });
+    if let Some(lines) = invite_preview(&app.share.invite_input) {
+        for line in lines {
+            ui.label(egui::RichText::new(line).small());
+        }
+    }
     let ready = !app.share.invite_input.trim().is_empty() && !app.share.name.trim().is_empty();
     ui.add_enabled_ui(ready, |ui| {
         if ui.button("Join").clicked() {
@@ -236,5 +261,47 @@ fn shared_panel(app: &mut WordApp, ui: &mut egui::Ui, ctx: &Context) {
         {
             app.share.status = Some(format!("Forgot {}.", short(&node)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::invite_preview;
+
+    fn invite(member_realm: Option<&str>, host_realm: Option<&str>, realm_invite: bool) -> String {
+        craft_collab::Invite {
+            v: craft_collab::INVITE_VERSION,
+            doc: "doc".into(),
+            host: "aa".repeat(32),
+            host_key: "bb".repeat(32),
+            host_name: "Hana".into(),
+            realm: "cc".repeat(32),
+            realm_key: String::new(),
+            profile: "pq_hybrid".into(),
+            seed: "station.example:4433:dd".into(),
+            issued_ms: 1,
+            expires_ms: 2,
+            token: None,
+            member_role: realm_invite.then_some(craft_collab::Role::Editor),
+            member_realm: member_realm.map(str::to_string),
+            host_realm: host_realm.map(str::to_string),
+            invitee: None,
+            invitee_name: None,
+            signature: Vec::new(),
+        }
+        .encode()
+        .expect("encode")
+    }
+
+    /// Fable round 1, item 3: a realm invite says which membership joining
+    /// presents, before the person presses Join.
+    #[test]
+    fn a_realm_invite_says_which_membership_joining_shows() {
+        let lines = invite_preview(&invite(Some("net.beam-campus"), Some("io.macula"), true)).expect("an invite");
+        assert_eq!(lines[0], "From Hana (says they are in io.macula).");
+        assert_eq!(lines[1], "Joining shows Hana your membership of net.beam-campus.");
+        let lines = invite_preview(&invite(None, None, false)).expect("an invite");
+        assert_eq!(lines, vec!["From Hana.".to_string()], "a token invite asks for no membership");
+        assert!(invite_preview("not an invite").is_none());
     }
 }

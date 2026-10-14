@@ -756,7 +756,15 @@ impl Session {
                 let Ok(merged) = merged else { return };
                 let Ok(pid) = para.parse::<u64>() else { return };
                 let carried: Option<wordcraft_doc::CharProps> = props.as_deref().and_then(|b| serde_json::from_slice(b).ok());
-                if self.doc.apply_paragraph_text(pid, &merged, carried.as_ref()) {
+                if let Some((story, path, pre, removed, inserted)) = self.doc.splice_paragraph_text(pid, &merged, carried.as_ref()) {
+                    // The local caret and selection follow the remote change
+                    // made before them, so the next local typing lands where
+                    // its author is, not inside the other person's text.
+                    for pos in [&mut self.sel.anchor, &mut self.sel.focus] {
+                        if pos.story == story && pos.path == path {
+                            pos.off = shifted_off(pos.off, pre, removed, inserted);
+                        }
+                    }
                     self.touch();
                     self.clamp_selection();
                 }
@@ -1153,6 +1161,21 @@ impl craft_collab::CollabHost for Session {
     }
 }
 
+/// Where a local position in a paragraph lands after a remote splice there
+/// (`pre` bytes kept, `removed` replaced by `inserted`): before the splice
+/// or exactly at an insert it stays (the remote text lands before the
+/// caret, so each writer's sentence stays whole); after it, it moves by the
+/// change; inside a removed span, it goes to the span's start.
+pub(crate) fn shifted_off(off: usize, pre: usize, removed: usize, inserted: usize) -> usize {
+    if off <= pre {
+        off
+    } else if off >= pre + removed {
+        off - removed + inserted
+    } else {
+        pre
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1161,6 +1184,54 @@ mod tests {
 
     fn session() -> Session {
         Session::new(Document::from_text(""))
+    }
+
+    /// Found in the three-person demo: a remote insert before the local
+    /// caret left the caret at the same absolute offset, so the local
+    /// person's next words landed inside the other person's text. The local
+    /// caret follows remote edits made before it; a remote insert exactly at
+    /// it lands before it, so each person's sentence stays contiguous.
+    #[test]
+    fn the_local_caret_follows_remote_edits_made_before_it() {
+        let (ta, tb) = MemoryTransport::pair("aaaaaaaa", "bbbbbbbb");
+        let mut a = session();
+        let mut b = session();
+        a.collab_attach("demo", "Alice", Box::new(ta));
+        b.collab_join("demo", "Bob", Box::new(tb));
+        b.collab_tick();
+        a.collab_tick();
+        b.collab_tick();
+        a.run("text.insert", &json!({"text": "Field notes. Third line."})).expect("A types");
+        b.collab_tick();
+
+        // Bob types at the end, word by word; Alice types after "Field notes. ".
+        let end = b.doc.plain_text(StoryRef::Body).len();
+        b.run("caret.set", &json!({"pos": {"story": "body", "path": [0], "off": end}})).expect("B caret");
+        a.run("caret.set", &json!({"pos": {"story": "body", "path": [0], "off": 13}})).expect("A caret");
+        for (wa, wb) in [("No ", " Each"), ("server ", " copy"), ("here. ", " converges.")] {
+            a.run("text.insert", &json!({"text": wa})).expect("A types a word");
+            b.run("text.insert", &json!({"text": wb})).expect("B types a word");
+            a.collab_tick();
+            b.collab_tick();
+            a.collab_tick();
+        }
+        let text = a.doc.plain_text(StoryRef::Body);
+        assert_eq!(text, b.doc.plain_text(StoryRef::Body), "converged");
+        assert_eq!(text, "Field notes. No server here. Third line. Each copy converges.", "each sentence stayed whole");
+    }
+
+    /// Where a position lands after a remote splice: before it, unchanged;
+    /// after it, moved by the change; inside a removed span, its start.
+    #[test]
+    fn a_position_is_shifted_by_a_remote_splice() {
+        use super::shifted_off;
+        // An insert of 4 at 5: before, at, after.
+        assert_eq!(shifted_off(3, 5, 0, 4), 3);
+        assert_eq!(shifted_off(5, 5, 0, 4), 5, "an insert at the caret lands before it");
+        assert_eq!(shifted_off(9, 5, 0, 4), 13);
+        // A removal of 3 at 5 (replaced by 1): inside goes to the start.
+        assert_eq!(shifted_off(6, 5, 3, 1), 5);
+        assert_eq!(shifted_off(10, 5, 3, 1), 8);
     }
 
     #[test]

@@ -2116,6 +2116,55 @@ mod tests {
         assert_eq!(host.doc.para_paths(StoryRef::Body).len(), 2, "and it applied: the paragraph split");
     }
 
+    /// Today's working layout: paragraphs the host makes BEFORE the others
+    /// join reach them in the snapshot, ids included, so each author can
+    /// write in their own paragraph and every replica agrees.
+    #[test]
+    fn paragraphs_made_before_the_join_carry_their_ids_to_every_author() {
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa", "bbbbbbbb", "cccccccc"]);
+        let (ta, tb, tc) = (bus.remove(0), bus.remove(0), bus.remove(0));
+        let mut h = session();
+        let mut i = session();
+        let mut e = session();
+        h.collab_attach("demo", "Hana", Box::new(ta));
+        h.run("text.insert", &json!({"text": "Field notes"})).expect("title");
+        h.run("para.heading1", &json!({})).expect("heading");
+        for _ in 0..3 {
+            h.run("text.newParagraph", &json!({})).expect("enter");
+        }
+        h.run("para.normal", &json!({})).ok();
+        i.collab_join("demo", "Ines", Box::new(tb));
+        e.collab_join("demo", "Eve", Box::new(tc));
+        let tick = |h: &mut Session, i: &mut Session, e: &mut Session| {
+            for _ in 0..3 {
+                i.collab_tick();
+                e.collab_tick();
+                h.collab_tick();
+            }
+        };
+        tick(&mut h, &mut i, &mut e);
+        for (who, n, s) in [("Hana, via helsinki.", 1, &mut h), ("Ines, via nuremberg.", 2, &mut i), ("Eve, via amsterdam.", 3, &mut e)] {
+            s.run("caret.set", &json!({"pos": {"story": "body", "path": [n], "off": 0}})).expect("caret");
+            s.run("text.insert", &json!({"text": who})).expect("own paragraph");
+        }
+        tick(&mut h, &mut i, &mut e);
+        let shape = |s: &Session| -> Vec<(String, Option<String>)> {
+            (0..s.doc.para_paths(StoryRef::Body).len())
+                .map(|n| {
+                    let p = s.doc.para(StoryRef::Body, &wordcraft_doc::Path::top(n)).expect("para");
+                    (p.text.clone(), p.props.style.clone())
+                })
+                .collect()
+        };
+        let hs = shape(&h);
+        assert_eq!(hs, shape(&i));
+        assert_eq!(hs, shape(&e));
+        assert_eq!(hs[0], ("Field notes".to_string(), Some("Heading1".to_string())));
+        assert_eq!(hs[1].0, "Hana, via helsinki.");
+        assert_eq!(hs[2].0, "Ines, via nuremberg.");
+        assert_eq!(hs[3].0, "Eve, via amsterdam.");
+    }
+
     /// The race the automated demo found live: two joiners are approved at
     /// the same time; the first has not caught up yet when the second asks
     /// for the document. Its empty document must not win — only the host

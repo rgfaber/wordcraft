@@ -1406,6 +1406,43 @@ mod tests {
         assert_eq!(a.doc.plain_text(StoryRef::Body), "Hello worldX", "typed at the caret");
     }
 
+    /// Formatting one author applies reaches the others with the same
+    /// coverage: bold through the CRDT, italic, colour and highlight as
+    /// replayed commands under the author's own selection.
+    #[test]
+    fn formatting_from_one_author_lands_on_the_other() {
+        let (ta, tb) = MemoryTransport::pair("aaaaaaaa", "bbbbbbbb");
+        let mut a = session();
+        let mut b = session();
+        a.collab_attach("demo", "Alice", Box::new(ta));
+        b.collab_join("demo", "Bob", Box::new(tb));
+        b.collab_tick();
+        a.collab_tick();
+        b.collab_tick();
+        a.run("text.insert", &json!({"text": "Hello wide world"})).expect("A types");
+        b.collab_tick();
+
+        b.run("select.text", &json!({"text": "Hello"})).expect("B selects");
+        b.run("format.bold", &json!({})).expect("B bolds");
+        b.run("select.text", &json!({"text": "wide"})).expect("B selects");
+        b.run("format.italic", &json!({})).expect("B italicises");
+        b.run("format.color", &json!({"color": "C0392B"})).expect("B colours");
+        b.run("select.text", &json!({"text": "world"})).expect("B selects");
+        b.run("format.highlight", &json!({"color": "yellow"})).expect("B highlights");
+        a.collab_tick();
+        b.collab_tick();
+        a.collab_tick();
+
+        assert_eq!(a.doc.plain_text(StoryRef::Body), "Hello wide world");
+        assert_eq!(runs_of(&a), runs_of(&b), "the same runs on both sides");
+        let para = a.doc.para(StoryRef::Body, &wordcraft_doc::Path::top(0)).expect("paragraph");
+        assert_eq!(para.props_of_char(0).bold, Some(true), "bold arrived");
+        assert_eq!(para.props_of_char(6).italic, Some(true), "italic arrived");
+        assert!(para.props_of_char(6).color.is_some(), "colour arrived");
+        assert!(para.props_of_char(11).highlight.is_some(), "highlight arrived");
+        assert_eq!(para.props_of_char(11).italic, None, "and only where it was applied");
+    }
+
     #[test]
     fn a_restarted_joiner_catches_up_and_keeps_merging() {
         // All three share one bus, as they do on one mesh topic; Carol's

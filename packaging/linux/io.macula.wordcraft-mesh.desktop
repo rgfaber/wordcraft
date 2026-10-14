@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=WordCraft (mesh preview)
+GenericName=Word Processor
+Comment=Write documents together over the Macula mesh, with no server in between
+Exec=wordcraft-mesh %F
+TryExec=wordcraft-mesh
+Icon=io.macula.wordcraft-mesh
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.macula.wordcraft-mesh
+Categories=Office;WordProcessor;
+Keywords=word;processor;document;docx;collaboration;mesh;co-edit;
+MimeType=application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.oasis.opendocument.text;application/rtf;text/markdown;text/html;text/plain;

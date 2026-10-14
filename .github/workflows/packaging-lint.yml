@@ -73,6 +73,10 @@ jobs:
           desktop-file-validate packaging/linux/ai.storyteller.wordcraft.desktop
           sed -e 's/@VERSION@/0.0.0/' -e 's/@DATE@/2026-01-01/' packaging/linux/ai.storyteller.wordcraft.metainfo.xml.in >"$RUNNER_TEMP/ai.storyteller.wordcraft.metainfo.xml"
           appstreamcli validate --no-net --explain "$RUNNER_TEMP/ai.storyteller.wordcraft.metainfo.xml"
+          # The fork's mesh preview build (packaging/linux/mesh-preview.sh) carries its own identity.
+          desktop-file-validate packaging/linux/io.macula.wordcraft-mesh.desktop
+          sed -e 's/@VERSION@/0.0.0/' -e 's/@DATE@/2026-01-01/' packaging/linux/io.macula.wordcraft-mesh.metainfo.xml.in >"$RUNNER_TEMP/io.macula.wordcraft-mesh.metainfo.xml"
+          appstreamcli validate --no-net --explain "$RUNNER_TEMP/io.macula.wordcraft-mesh.metainfo.xml"
           python3 - <<'EOF'
           import yaml
           src = yaml.safe_load(open("packaging/linux/flatpak/ai.storyteller.wordcraft.yml"))

@@ -2630,9 +2630,9 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "macula-craft-collab"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c15bc18d9c2bd4a8b78895b0eaa7dde6fa545e701339f6b69856975c675a0f6c"
+checksum = "74375296b4b7263f9d40b5e554785c4eded4fa4e396171595c4eb411aa754b35"
 dependencies = [
  "base64",
  "getrandom 0.2.17",
@@ -2648,9 +2648,9 @@ dependencies = [
 
 [[package]]
 name = "macula-craft-seam"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bce5f6e0b18efd8ee635d6ca5d3520da3cc8fa51a1e19cbbffdf590d7d919e5f"
+checksum = "999985b9c09b52830fcc537b611c78ced1b2e86458afac08c94ae9bec34501d8"
 dependencies = [
  "serde",
  "serde_json",

@@ -15,7 +15,7 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("collab.stats", "Collaboration Status", "Agents", |s, _| stats(s)).params("{}").pure(),
         CommandSpec::new("collab.invite", "Invite to Document", "Agents", invite)
-            .params(r#"{"realm": string, "realmKey": string, "seed": string, "role": "editor"|"viewer", "ttlMs": number, "forNode"?: hex, "forName"?: string, "realmMembers"?: 1}"#)
+            .params(r#"{"realm": string, "realmKey": string, "seed": string, "role": "editor"|"viewer", "ttlMs": number, "forNode"?: hex, "forName"?: string, "realmMembers"?: true}"#)
             .pure(),
         CommandSpec::new("collab.approve", "Approve a Joiner", "Agents", approve).params(r#"{"node": string}"#).pure(),
         CommandSpec::new("collab.revoke", "Revoke a Holder", "Agents", revoke).params(r#"{"node": string}"#).pure(),

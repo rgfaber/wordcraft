@@ -37,9 +37,24 @@ pub fn next_rev() -> u64 {
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 
-/// A fresh collaboration id (process-unique) for a paragraph.
+/// This process's random base for paragraph ids: co-editing replicas each
+/// allocate ids, and a counter from 1 in every process hands two people the
+/// same id for different paragraphs. 52 random bits (an id stays exact in a
+/// JSON number), the low 24 left for the counter.
+fn pid_base() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    static BASE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *BASE.get_or_init(|| {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(std::process::id() as u64);
+        (h.finish() & ((1u64 << 52) - 1)) & !((1u64 << 24) - 1)
+    })
+}
+
+/// A fresh collaboration id for a paragraph: unique in this process, and
+/// (with a random per-process base) unique across co-editing processes.
 pub fn next_pid() -> u64 {
-    NEXT_PID.fetch_add(1, Ordering::Relaxed)
+    pid_base() | (NEXT_PID.fetch_add(1, Ordering::Relaxed) & ((1u64 << 24) - 1)).max(1)
 }
 
 /// A formatting run: `len` bytes of text sharing `props`.
@@ -720,6 +735,15 @@ impl Paragraph {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn paragraph_ids_are_unique_nonzero_and_not_a_shared_count() {
+        let a = super::next_pid();
+        let b = super::next_pid();
+        assert!(a != 0 && b != 0 && a != b);
+        assert!(a < (1u64 << 53), "an id stays exact as a JSON number");
+        assert!(a > (1u64 << 24), "ids carry the process's random base, not a count every process repeats");
+    }
+
     use super::*;
 
     fn bold() -> CharProps {

@@ -28,6 +28,9 @@ jobs:
           - { arch: aarch64, runner: ubuntu-22.04-arm, deb: arm64 }
     env:
       NFPM_VERSION: 2.47.0
+      # The bundled fonts (CJK among them) for the tests and the package, as upstream's CI.
+      CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+      CRAFT_FONTS_REQUIRED: "1"
     steps:
       - uses: actions/checkout@v4
       - name: Check out craft-fonts
@@ -55,9 +58,6 @@ jobs:
           cargo xtask version set "$v"
       - run: cargo test --workspace --locked
       - name: Build and package (tar.gz, deb)
-        env:
-          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
-          CRAFT_FONTS_REQUIRED: "1"
         run: packaging/linux/mesh-preview.sh --formats "tar deb"
       - name: Check the packages
         run: |

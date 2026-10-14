@@ -25,9 +25,9 @@ wordcraft-engine = { path = "crates/engine" }
 wordcraft-mcp = { path = "crates/mcp" }
 wordcraft-ui-egui = { path = "crates/ui-egui" }
 # the shared Craft collaboration seam (spike branch in the craft-libs fork)
-craft-collab = { path = "../craft-libs/crates/collab", package = "macula-craft-seam", version = "0.1" }
+craft-collab = { package = "macula-craft-seam", version = "0.1" }
 # its mesh transport (local spike repo, macula-rust released crates only)
-macula-craft-collab = { path = "../../macula-io/macula-craft-collab" }
+macula-craft-collab = "0.1"
 
 # foundation
 kurbo = { version = "0.13", features = ["serde"] }

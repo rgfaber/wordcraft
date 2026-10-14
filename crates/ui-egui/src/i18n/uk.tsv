@@ -56,6 +56,7 @@
 	Apply Asian line-breaking rules (kinsoku)	Застосовувати азійські правила розриву рядків (кінсоку)
 	Apply Character Style	Застосувати стиль символів
 	Apply Style	Застосувати стиль
+	Approve a Joiner	Схвалити того, хто приєднується
 	Arrange	Упорядкувати
 	Arrange\nAll	Упорядкувати\nвсі
 	Arrow	Стрілка
@@ -86,6 +87,7 @@
 	Check spelling as you type	Перевіряти правопис під час введення
 	Click level to modify:	Виберіть рівень для змінення:
 	Click to switch back to inserting	Клацніть, щоб повернутися до вставлення
+	Collaboration Status	Стан спільної роботи
 	Color only	Лише колір
 	Custom dictionary	Власний словник
 	Define New Multilevel List	Визначити новий багаторівневий список
@@ -93,6 +95,7 @@
 	Deletions:	Видалення:
 	Enter formatting for number:	Вигляд номера:
 	Follow number with:	Після номера:
+	Forget a Contact	Забути контакт
 	Formatting	Форматування
 	Formatting marks	Знаки форматування
 	Hidden text	Прихований текст
@@ -109,10 +112,12 @@
 	Interface	Інтерфейс
 	Interface language	Мова інтерфейсу
 	Inside:	Усередині:
+	Invite to Document	Запросити до документа
 	Latin text font:	Шрифт латинського тексту:
 	Left border	Ліва межа
 	Legal style numbering	Юридична нумерація
 	Link level to style:	Зв'язати рівень зі стилем:
+	List Contacts	Список контактів
 	List Definition	Визначення списку
 	Mark grammar errors as you type	Позначати граматичні помилки під час введення
 	Measurement units:	Одиниці виміру:
@@ -130,16 +135,19 @@
 	Overtype (typing replaces the characters after the caret)	Заміна (введений текст замінює символи після курсора)
 	Page display	Відображення сторінки
 	Paragraph marks	Знаки абзацу
+	Pending Join Requests	Запити на приєднання, що очікують
 	Personalize	Персоналізація
 	Picas	Піки
 	Points	Пункти
 	Print the page color	Друкувати колір сторінки
 	Printing	Друк
 	Proofing language	Мова перевірки
+	Realm Membership	Членство в області
 	Recent documents to show:	Кількість останніх документів:
 	Remove	Вилучити
 	Outside:	Зовні:
 	Restart list after:	Почати список знову після:
+	Revoke a Holder	Відкликати доступ
 	Right border	Права межа
 	Save documents	Збереження документів
 	Save the document to turn on AutoSave	Збережіть документ, щоб увімкнути автозбереження

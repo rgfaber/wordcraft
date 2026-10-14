@@ -64,6 +64,7 @@
 	Apply Character Style	Примени стил знакова
 	Apply Style	Примени стил
 	Apply Styles	Изабери и примени стилове
+	Approve a Joiner	Одобри онога ко се придружује
 	Arrange	Ређање
 	Arrange\nAll	Распореди\nсве
 	Arrow	Стрелица
@@ -104,6 +105,7 @@
 	Click to switch back to inserting	Кликните да бисте се вратили на уметање
 	Clipboard Items	Ставке оставе
 	Clipboard Pane	Окно оставе
+	Collaboration Status	Стање сарадње
 	Color only	Само боја
 	Color: {color}	Боја: {color}
 	Compress punctuation at the start of a line	Сажми интерпункцију на почетку реда
@@ -119,6 +121,7 @@
 	Edit Comment	Уреди коментар
 	Enter formatting for number:	Облик броја:
 	Follow number with:	После броја:
+	Forget a Contact	Заборави контакт
 	Formatting	Обликовање
 	Formatting marks	Ознаке обликовања
 	Hidden text	Скривени текст
@@ -135,11 +138,13 @@
 	Interface	Интерфејс
 	Interface language	Језик интерфејса
 	Inside:	Унутра:
+	Invite to Document	Позови у документ
 	Latin text font:	Фонт латиничног текста:
 	Left border	Лева ивица
 	Left Margin	Лева маргина
 	Legal style numbering	Правно нумерисање
 	Link level to style:	Повежи ниво са стилом:
+	List Contacts	Листа контаката
 	List Definition	Дефиниција листе
 	Mark grammar errors as you type	Означавај граматичке грешке током куцања
 	Measurement units:	Јединице мере:
@@ -161,17 +166,20 @@
 	Overtype (typing replaces the characters after the caret)	Преписивање (откуцано замењује знакове после курсора)
 	Page display	Приказ стране
 	Paragraph marks	Ознаке пасуса
+	Pending Join Requests	Захтеви за придруживање на чекању
 	Personalize	Персонализација
 	Picas	Пике
 	Points	Тачке
 	Print the page color	Штампај боју стране
 	Printing	Штампање
 	Proofing language	Језик провере писања
+	Realm Membership	Чланство у области
 	Recent documents to show:	Број недавних докумената за приказ:
 	Remove	Уклони
 	Outside:	Споља:
 	Reopen	Поново отвори
 	Restart list after:	Поново почни листу после:
+	Revoke a Holder	Опозови приступ
 	Right border	Десна ивица
 	Right Margin	Десна маргина
 	Delete Clipboard Item	Обриши ставку из оставе

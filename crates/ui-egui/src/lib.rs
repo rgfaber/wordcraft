@@ -1094,13 +1094,16 @@ impl WordApp {
             "ui.realmRefresh" => {
                 let Some(refresh) = self.services.realm_refresh.as_ref() else {
                     return Some(Err("this build has no realm support".into()));
+                };
                 match refresh(&mut self.session) {
                     Ok(status) => json!({"realm": status}),
                     Err(e) => return Some(Err(e)),
                 }
+            }
             "ui.signIn" => {
                 let Some(sign_in) = self.services.sign_in.as_ref() else {
                     return Some(Err("this build has no realm support".into()));
+                };
                 match sign_in(&mut self.session) {
                     Ok(started) => {
                         // The window shows the same session the command started.
@@ -1111,9 +1114,11 @@ impl WordApp {
                     }
                     Err(e) => return Some(Err(e)),
                 }
+            }
             "ui.signInCheck" => {
                 let Some(check) = self.services.sign_in_check.as_ref() else {
                     return Some(Err("this build has no realm support".into()));
+                };
                 match check(&mut self.session) {
                     Ok(status) => {
                         if status["status"].as_str() != Some("pending") {
@@ -1152,9 +1157,11 @@ impl WordApp {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 }
+            }
             "ui.share" => {
                 self.share.open = p.get("value").and_then(Value::as_bool).unwrap_or(!self.share.open);
                 json!({"share": self.share.open, "active": self.session.collab_active()})
+            }
             "ui.openFileDialog" => {
                 self.open_dialog();
                 json!({})

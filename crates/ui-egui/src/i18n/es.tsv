@@ -58,6 +58,7 @@
 	Apply Asian line-breaking rules (kinsoku)	Aplicar las reglas asiáticas de división de líneas (kinsoku)
 	Apply Character Style	Aplicar estilo de carácter
 	Apply Style	Aplicar estilo
+	Approve a Joiner	Aprobar a quien se une
 	Arrange	Organizar
 	Arrange\nAll	Organizar\ntodo
 	Arrow	Flecha
@@ -83,6 +84,7 @@
 	Click level to modify:	Haz clic en el nivel que quieras modificar:
 	Check spelling as you type	Revisar la ortografía mientras escribes
 	Click to switch back to inserting	Haz clic para volver a insertar
+	Collaboration Status	Estado de la colaboración
 	Color only	Solo color
 	Custom dictionary	Diccionario personalizado
 	Define New Multilevel List	Definir nueva lista multinivel
@@ -90,6 +92,7 @@
 	Deletions:	Eliminaciones:
 	Enter formatting for number:	Formato del número:
 	Follow number with:	Después del número:
+	Forget a Contact	Olvidar un contacto
 	Formatting	Formato
 	Formatting marks	Marcas de formato
 	Hidden text	Texto oculto
@@ -106,10 +109,12 @@
 	Interface	Interfaz
 	Interface language	Idioma de la interfaz
 	Inside:	Interior:
+	Invite to Document	Invitar al documento
 	Latin text font:	Fuente de texto latino:
 	Left border	Borde izquierdo
 	Legal style numbering	Numeración de estilo legal
 	Link level to style:	Vincular nivel con estilo:
+	List Contacts	Lista de contactos
 	List Definition	Definición de lista
 	Mark grammar errors as you type	Marcar errores gramaticales mientras escribes
 	Measurement units:	Unidades de medida:
@@ -127,16 +132,19 @@
 	Overtype (typing replaces the characters after the caret)	Sobrescribir (lo que escribes reemplaza los caracteres tras el cursor)
 	Page display	Visualización de página
 	Paragraph marks	Marcas de párrafo
+	Pending Join Requests	Solicitudes de unión pendientes
 	Personalize	Personalizar
 	Picas	Picas
 	Points	Puntos
 	Print the page color	Imprimir el color de página
 	Printing	Impresión
 	Proofing language	Idioma de revisión
+	Realm Membership	Pertenencia al dominio
 	Recent documents to show:	Documentos recientes que mostrar:
 	Remove	Quitar
 	Outside:	Exterior:
 	Restart list after:	Reiniciar lista después de:
+	Revoke a Holder	Revocar el acceso
 	Right border	Borde derecho
 	Save the document to turn on AutoSave	Guarda el documento para activar el autoguardado
 	Save the document to turn on AutoSave (a file you have only opened isn't rewritten until you save it)	Guarda el documento para activar el autoguardado (un archivo que solo has abierto no se reescribe hasta que lo guardes)

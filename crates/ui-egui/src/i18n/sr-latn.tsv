@@ -60,6 +60,7 @@
 	Apply Character Style	Primeni stil znakova
 	Apply Style	Primeni stil
 	Apply Styles	Izaberi i primeni stilove
+	Approve a Joiner	Odobri onoga ko se pridružuje
 	Arrange	Ređanje
 	Arrange\nAll	Rasporedi\nsve
 	Arrow	Strelica
@@ -100,6 +101,7 @@
 	Click to switch back to inserting	Kliknite da biste se vratili na umetanje
 	Clipboard Items	Stavke ostave
 	Clipboard Pane	Okno ostave
+	Collaboration Status	Stanje saradnje
 	Color only	Samo boja
 	Color: {color}	Boja: {color}
 	Compress punctuation at the start of a line	Sažmi interpunkciju na početku reda
@@ -115,6 +117,7 @@
 	Edit Comment	Uredi komentar
 	Enter formatting for number:	Oblik broja:
 	Follow number with:	Posle broja:
+	Forget a Contact	Zaboravi kontakt
 	Formatting	Oblikovanje
 	Formatting marks	Oznake oblikovanja
 	Hidden text	Skriveni tekst
@@ -131,11 +134,13 @@
 	Interface	Interfejs
 	Interface language	Jezik interfejsa
 	Inside:	Unutra:
+	Invite to Document	Pozovi u dokument
 	Latin text font:	Font latiničnog teksta:
 	Left border	Leva ivica
 	Left Margin	Leva margina
 	Legal style numbering	Pravno numerisanje
 	Link level to style:	Poveži nivo sa stilom:
+	List Contacts	Lista kontakata
 	List Definition	Definicija liste
 	Mark grammar errors as you type	Označavaj gramatičke greške tokom kucanja
 	Measurement units:	Jedinice mere:
@@ -157,17 +162,20 @@
 	Overtype (typing replaces the characters after the caret)	Prepisivanje (otkucano zamenjuje znakove posle kursora)
 	Page display	Prikaz strane
 	Paragraph marks	Oznake pasusa
+	Pending Join Requests	Zahtevi za pridruživanje na čekanju
 	Personalize	Personalizacija
 	Picas	Pike
 	Points	Tačke
 	Print the page color	Štampaj boju strane
 	Printing	Štampanje
 	Proofing language	Jezik provere pisanja
+	Realm Membership	Članstvo u oblasti
 	Recent documents to show:	Broj nedavnih dokumenata za prikaz:
 	Remove	Ukloni
 	Outside:	Spolja:
 	Reopen	Ponovo otvori
 	Restart list after:	Ponovo počni listu posle:
+	Revoke a Holder	Opozovi pristup
 	Right border	Desna ivica
 	Right Margin	Desna margina
 	Delete Clipboard Item	Obriši stavku iz ostave

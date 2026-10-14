@@ -54,6 +54,7 @@
 	Apply Asian line-breaking rules (kinsoku)	Aplicar as regras asiáticas de quebra de linha (kinsoku)
 	Apply Character Style	Aplicar estilo de caractere
 	Apply Style	Aplicar estilo
+	Approve a Joiner	Aprovar participante
 	Arrange	Organizar
 	Arrange\nAll	Organizar\ntudo
 	Arrow	Seta
@@ -84,6 +85,7 @@
 	Check spelling as you type	Verificar a ortografia enquanto você digita
 	Click level to modify:	Clique no nível a modificar:
 	Click to switch back to inserting	Clique para voltar a inserir
+	Collaboration Status	Status da colaboração
 	Color only	Somente cor
 	Custom dictionary	Dicionário personalizado
 	Define New Multilevel List	Definir nova lista de vários níveis
@@ -91,6 +93,7 @@
 	Deletions:	Exclusões:
 	Enter formatting for number:	Formatação do número:
 	Follow number with:	Após o número:
+	Forget a Contact	Esquecer contato
 	Formatting	Formatação
 	Formatting marks	Marcas de formatação
 	Hidden text	Texto oculto
@@ -107,10 +110,12 @@
 	Interface	Interface
 	Interface language	Idioma da interface
 	Inside:	Interno:
+	Invite to Document	Convidar para o documento
 	Latin text font:	Fonte de texto latino:
 	Left border	Borda esquerda
 	Legal style numbering	Numeração no estilo legal
 	Link level to style:	Vincular nível ao estilo:
+	List Contacts	Listar contatos
 	List Definition	Definição da lista
 	Mark grammar errors as you type	Marcar erros gramaticais enquanto você digita
 	Measurement units:	Unidades de medida:
@@ -128,16 +133,19 @@
 	Overtype (typing replaces the characters after the caret)	Sobrescrever (o que você digita substitui os caracteres após o cursor)
 	Page display	Exibição da página
 	Paragraph marks	Marcas de parágrafo
+	Pending Join Requests	Solicitações de participação pendentes
 	Personalize	Personalizar
 	Picas	Paicas
 	Points	Pontos
 	Print the page color	Imprimir a cor da página
 	Printing	Impressão
 	Proofing language	Idioma de revisão
+	Realm Membership	Associação ao domínio
 	Recent documents to show:	Documentos recentes a mostrar:
 	Remove	Remover
 	Outside:	Externo:
 	Restart list after:	Reiniciar lista após:
+	Revoke a Holder	Revogar acesso
 	Right border	Borda direita
 	Save documents	Salvar documentos
 	Save the document to turn on AutoSave	Salve o documento para ativar o salvamento automático

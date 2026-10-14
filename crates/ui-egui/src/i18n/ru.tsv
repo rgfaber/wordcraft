@@ -51,6 +51,7 @@
 	Annotation Text	Текст примечания
 	Apply Character Style	Применить стиль знаков
 	Apply Style	Применить стиль
+	Approve a Joiner	Одобрить присоединяющегося
 	Arrange	Упорядочить
 	Arrange\nAll	Упорядочить\nвсе
 	Arrow	Стрелка
@@ -131,6 +132,7 @@
 	Clipboard	Буфер обмена
 	Close	Закрыть
 	Close Header and Footer	Закрыть колонтитулы
+	Collaboration Status	Состояние совместной работы
 	Collapse Selection	Свернуть выделение
 	Color	Цвет
 	Color:	Цвет:
@@ -189,6 +191,12 @@
 	Delete Style	Удалить стиль
 	Delete Table	Удалить таблицу
 	Design	Дизайн
+	Forget a Contact	Забыть контакт
+	Invite to Document	Пригласить в документ
+	List Contacts	Список контактов
+	Pending Join Requests	Ожидающие запросы на присоединение
+	Realm Membership	Членство в области
+	Revoke a Holder	Отозвать доступ
 	Search	Поиск
 	Title Bar	Строка заголовка
 	development build	сборка для разработки

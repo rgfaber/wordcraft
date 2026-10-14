@@ -53,6 +53,7 @@
 	Annotation Text	Jegyzetszöveg
 	Apply Character Style	Karakterstílus alkalmazása
 	Apply Style	Stílus alkalmazása
+	Approve a Joiner	Csatlakozó jóváhagyása
 	Arrange	Elhelyezés
 	Arrange\nAll	Ablakok\nrendezése
 	Arrow	Nyíl
@@ -133,6 +134,7 @@
 	Clipboard	Vágólap
 	Close	Bezárás
 	Close Header and Footer	Élőfej és élőláb bezárása
+	Collaboration Status	Együttműködés állapota
 	Collapse Selection	Kijelölés összehúzása
 	Color	Szín
 	Color:	Szín:
@@ -284,6 +286,7 @@
 	Footnote Reference	Lábjegyzet-hivatkozás
 	Footnote Text	Lábjegyzetszöveg
 	Footnotes	Lábjegyzetek
+	Forget a Contact	Kapcsolat elfelejtése
 	Format	Formátum
 	Format Page Numbers	Oldalszámok formázása
 	Format Page Numbers…	Oldalszámok formázása…
@@ -367,6 +370,7 @@
 	Intense Quote	Kiemelt idézet
 	Intense Reference	Erős hivatkozás
 	Interface language:	Felület nyelve:
+	Invite to Document	Meghívás a dokumentumba
 	Italic	Dőlt
 	Join the ArtCraft community on Discord	Csatlakozz az ArtCraft közösséghez a Discordon
 	Join us on Discord: discord.gg/artcraft	Csatlakozz hozzánk a Discordon: discord.gg/artcraft
@@ -407,6 +411,7 @@
 	Link	Link
 	Link to Previous	Csatolás az előzőhöz
 	Links	Linkek
+	List Contacts	Kapcsolatok listája
 	List Paragraph	Listabekezdés
 	Location: {path}	Hely: {path}
 	lowercase	kisbetűs
@@ -528,6 +533,7 @@
 	PDF document (*.pdf)	PDF-dokumentum (*.pdf)
 	Pen	Toll
 	Pencil	Ceruza
+	Pending Join Requests	Függőben lévő csatlakozási kérelmek
 	Picture Border	Kép szegélye
 	Picture Format	Képformátum
 	Picture Styles	Képstílusok
@@ -558,6 +564,7 @@
 	Read Mode	Olvasó mód
 	Read\nAloud	Felolvasás
 	Read\nMode	Olvasó\nmód
+	Realm Membership	Tagság a tartományban
 	Recent	Legutóbbiak
 	Record Macro	Makró rögzítése
 	Recover Unsaved Documents	Nem mentett dokumentumok helyreállítása
@@ -601,6 +608,7 @@
 	Reviewing	Véleményezés
 	Reviewing Pane	Véleményezés panel
 	Reviewing — edits become suggestions	Véleményezés – a módosítások javaslatként jelennek meg
+	Revoke a Holder	Hozzáférés visszavonása
 	Rich Text Format (*.rtf)	Rich Text Format (*.rtf)
 	Right	Jobb
 	Right Border	Jobb szegély

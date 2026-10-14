@@ -45,6 +45,7 @@
 	Alt Text	Asendustekst
 	Apply Character Style	Rakenda märgistiil
 	Apply Style	Rakenda stiil
+	Approve a Joiner	Kinnita liituja
 	Arrange	Paiguta
 	Arrange\nAll	Paiguta\nkõik
 	Arrow	Nool
@@ -135,6 +136,7 @@
 	Clipboard	Lõikelaud
 	Close	Sulge
 	Close Header and Footer	Sulge päis ja jalus
+	Collaboration Status	Koostöö olek
 	Collapse Selection	Ahenda valik
 	Color	Värv
 	Color:	Värv:
@@ -286,6 +288,7 @@
 	Footnote Reference	Allmärkuse viide
 	Footnote Text	Allmärkuse tekst
 	Footnotes	Allmärkused
+	Forget a Contact	Unusta kontakt
 	Format	Vorming
 	Format Page Numbers	Vorminda leheküljenumbrid
 	Format Page Numbers…	Vorminda leheküljenumbrid…
@@ -382,6 +385,7 @@
 	Interface	Kasutajaliides
 	Interface language	Kasutajaliidese keel
 	Interface language:	Kasutajaliidese keel:
+	Invite to Document	Kutsu dokumendi juurde
 	Italic	Kaldkiri
 	Join the ArtCraft community on Discord	Liitu ArtCrafti kogukonnaga Discordis
 	Join us on Discord: discord.gg/artcraft	Liitu meiega Discordis: discord.gg/artcraft
@@ -423,6 +427,7 @@
 	Link	Link
 	Link to Previous	Seo eelmisega
 	Links	Lingid
+	List Contacts	Kontaktide loend
 	Location: {path}	Asukoht: {path}
 	Mirror indents	Peegelda taanded
 	MIT OR Apache-2.0. Copyright (c) 2026 ArtCraft Team and the WordCraft contributors.	MIT OR Apache-2.0. Autoriõigus (c) 2026 ArtCrafti meeskond ja WordCrafti kaasautorid.
@@ -558,6 +563,7 @@
 	Paste: Merge Formatting	Kleebi: ühenda vormindus
 	Pen	Pliiats
 	Pencil	Grafiitpliiats
+	Pending Join Requests	Ootel liitumistaotlused
 	Personalize	Isikupärastamine
 	Picas	Piikad
 	Picture Border	Pildi ääris
@@ -599,6 +605,7 @@
 	Picture	Pilt
 	Pastes the clipboard's picture.	Kleebib lõikelaual oleva pildi.
 	Reading Highlight	Otsingutulemuste esiletõst
+	Realm Membership	Valdkonna liikmesus
 	Recent	Hiljutised
 	Recent documents to show:	Kuvatavad hiljutised dokumendid:
 	Record Macro	Salvesta makro
@@ -645,6 +652,7 @@
 	Reviewing	Läbivaatus
 	Reviewing Pane	Läbivaatuspaan
 	Reviewing — edits become suggestions	Läbivaatus — muudatused muutuvad soovitusteks
+	Revoke a Holder	Tühista juurdepääs
 	Rich Text Format (*.rtf)	Vormindatud tekst (*.rtf)
 	Rich Text Format (RTF)	Vormindatud tekst (RTF)
 	Right	Parem

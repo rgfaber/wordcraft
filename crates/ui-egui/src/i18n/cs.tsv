@@ -87,6 +87,7 @@
 	Apply Style	Použít styl
 	Apply Styles	Použít styly
 	Apply to:	Použít na:
+	Approve a Joiner	Schválit připojujícího se
 	Arrange	Uspořádat
 	Arrange\nAll	Uspořádat\nvše
 	Arrow	Šipka
@@ -215,6 +216,7 @@
 	Close Equation	Zavřít rovnici
 	Close Header and Footer	Zavřít záhlaví a zápatí
 	Col #:	Sloupec č.:
+	Collaboration Status	Stav spolupráce
 	Collapse Selection	Sbalit výběr
 	Color	Barva
 	Color only	Pouze barva
@@ -449,6 +451,7 @@
 	Footer	Zápatí
 	Footnote and Endnote	Poznámka pod čarou a vysvětlivka
 	Footnotes	Poznámky pod čarou
+	Forget a Contact	Zapomenout kontakt
 	Format	Formát
 	Format Page Numbers	Formát číslování stránek
 	Format Page Numbers…	Formát číslování stránek…
@@ -568,6 +571,7 @@
 	Interface Theme	Motiv rozhraní
 	Interface theme:	Motiv rozhraní:
 	Interface\nTheme	Motiv\nrozhraní
+	Invite to Document	Pozvat do dokumentu
 	Italic	Kurzíva
 	Join the ArtCraft community on Discord	Připojte se ke komunitě ArtCraft na Discordu
 	Join us on Discord: discord.gg/artcraft	Připojte se k nám na Discordu: discord.gg/artcraft
@@ -633,6 +637,7 @@
 	Linked style (paragraph and character)	Propojený styl (odstavec a znak)
 	Links	Odkazy
 	Links and References	Odkazy a reference
+	List Contacts	Seznam kontaktů
 	List Definition	Definice seznamu
 	Location: {path}	Umístění: {path}
 	lowercase	malá písmena
@@ -819,6 +824,7 @@
 	PDF document (*.pdf)	Dokument PDF (*.pdf)
 	Pen	Pero
 	Pencil	Tužka
+	Pending Join Requests	Čekající žádosti o připojení
 	Pens	Pera
 	Pick a field from the list	Vyberte pole ze seznamu
 	Picture Border	Ohraničení obrázku
@@ -870,6 +876,7 @@
 	Reads the clipboard's web content and keeps its formatting.	Načte webový obsah ze schránky a zachová jeho formátování.
 	Picture	Obrázek
 	Pastes the clipboard's picture.	Vloží obrázek ze schránky.
+	Realm Membership	Členství v oblasti
 	Recent	Nedávné
 	Recently used symbols:	Naposledy použité symboly:
 	Recipient List	Seznam příjemců
@@ -928,6 +935,7 @@
 	Reviewing	Revize
 	Reviewing Pane	Podokno revizí
 	Reviewing — edits become suggestions	Revize — úpravy se ukládají jako návrhy
+	Revoke a Holder	Odebrat přístup
 	Rich Text Format (*.rtf)	Formát RTF (*.rtf)
 	Rich Text Format (RTF)	Formát RTF (Rich Text Format)
 	Right	Vpravo

@@ -50,6 +50,7 @@
 	Annotation Text	Açıklama Metni
 	Apply Character Style	Karakter Stili Uygula
 	Apply Style	Stil Uygula
+	Approve a Joiner	Katılanı onayla
 	Arrange	Yerleştir
 	Arrange\nAll	Tümünü\nYerleştir
 	Arrow	Ok
@@ -130,6 +131,7 @@
 	Clipboard	Pano
 	Close	Kapat
 	Close Header and Footer	Üstbilgi ve Altbilgiyi Kapat
+	Collaboration Status	İş birliği durumu
 	Collapse Selection	Seçimi Daralt
 	Color	Renk
 	Color:	Renk:
@@ -282,6 +284,7 @@
 	Footnote Reference	Dipnot Başvurusu
 	Footnote Text	Dipnot Metni
 	Footnotes	Dipnotlar
+	Forget a Contact	Kişiyi unut
 	Format	Biçim
 	Format Page Numbers	Sayfa Numaralarını Biçimlendir
 	Format Page Numbers…	Sayfa Numaralarını Biçimlendir…
@@ -366,6 +369,7 @@
 	Inside Borders	İç Kenarlıklar
 	Inspect Document	Belgeyi İncele
 	Interface language:	Arayüz dili:
+	Invite to Document	Belgeye davet et
 	Italic	İtalik
 	Join the ArtCraft community on Discord	Discord'da ArtCraft topluluğuna katılın
 	Join us on Discord: discord.gg/artcraft	Discord'da bize katılın: discord.gg/artcraft
@@ -407,6 +411,7 @@
 	Link	Bağlantı
 	Link to Previous	Öncekine Bağla
 	Links	Bağlantılar
+	List Contacts	Kişileri listele
 	List Paragraph	Liste Paragrafı
 	Location: {path}	Konum: {path}
 	lowercase	küçük harf
@@ -528,6 +533,7 @@
 	PDF document (*.pdf)	PDF belgesi (*.pdf)
 	Pen	Kalem
 	Pencil	Kurşun Kalem
+	Pending Join Requests	Bekleyen katılma istekleri
 	Picture Border	Resim Kenarlığı
 	Picture Format	Resim Biçimi
 	Picture Styles	Resim Stilleri
@@ -563,6 +569,7 @@
 	Picture	Resim
 	Pastes the clipboard's picture.	Panodaki resmi yapıştırır.
 	Reading Highlight	Okuma Vurgusu
+	Realm Membership	Alan üyeliği
 	Recent	Son Kullanılanlar
 	Record Macro	Makro Kaydet
 	Recover Unsaved Documents	Kaydedilmemiş Belgeleri Kurtar
@@ -606,6 +613,7 @@
 	Reviewing	İnceleme
 	Reviewing Pane	İnceleme Bölmesi
 	Reviewing — edits become suggestions	İnceleme — düzenlemeler öneriye dönüşür
+	Revoke a Holder	Erişimi iptal et
 	Rich Text Format (*.rtf)	Zengin Metin Biçimi (*.rtf)
 	Right	Sağ
 	Right Border	Sağ Kenarlık

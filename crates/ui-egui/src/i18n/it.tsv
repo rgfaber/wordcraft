@@ -59,6 +59,7 @@
 	Apply Asian line-breaking rules (kinsoku)	Applica le regole asiatiche di interruzione di riga (kinsoku)
 	Apply Character Style	Applica stile carattere
 	Apply Style	Applica stile
+	Approve a Joiner	Approva chi si unisce
 	Arrange	Disponi
 	Arrange\nAll	Disponi\ntutto
 	Arrow	Freccia
@@ -78,27 +79,34 @@
 	By author	Per autore
 	Changed lines:	Righe modificate:
 	Click level to modify:	Fai clic sul livello da modificare:
+	Collaboration Status	Stato della collaborazione
 	Color only	Solo colore
 	Define New Multilevel List	Definisci nuovo elenco a più livelli
 	Define New Multilevel List…	Definisci nuovo elenco a più livelli…
 	Deletions:	Eliminazioni:
 	Enter formatting for number:	Formato del numero:
 	Follow number with:	Dopo il numero:
+	Forget a Contact	Dimentica un contatto
 	Formatting	Formattazione
 	Include level number from:	Includi numero di livello da:
 	Ink	Penna
 	Insertions and Deletions	Inserimenti ed eliminazioni
 	Insertions:	Inserimenti:
+	Invite to Document	Invita al documento
 	Left border	Bordo sinistro
 	Legal style numbering	Numerazione stile legale
 	Link level to style:	Collega livello allo stile:
+	List Contacts	Elenco contatti
 	List Definition	Definizione elenco
 	Nothing	Niente
 	Number alignment:	Allineamento numero:
 	Number format	Formato numero
 	Number style for this level:	Stile numero per questo livello:
 	Outside border	Bordo esterno
+	Pending Join Requests	Richieste di partecipazione in sospeso
+	Realm Membership	Appartenenza al dominio
 	Restart list after:	Riavvia elenco dopo:
+	Revoke a Holder	Revoca l’accesso
 	Right border	Bordo destro
 	Save the document to turn on AutoSave	Salva il documento per attivare il salvataggio automatico
 	Save the document to turn on AutoSave (a file you have only opened isn't rewritten until you save it)	Salva il documento per attivare il salvataggio automatico (un file solo aperto non viene riscritto finché non lo salvi)

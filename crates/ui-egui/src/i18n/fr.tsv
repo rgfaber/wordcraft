@@ -54,6 +54,7 @@
 	Apply Asian line-breaking rules (kinsoku)	Appliquer les règles de coupure de lignes asiatiques (kinsoku)
 	Apply Character Style	Appliquer le style de caractère
 	Apply Style	Appliquer le style
+	Approve a Joiner	Approuver un participant
 	Arrange	Organiser
 	Arrange\nAll	Organiser\ntout
 	Arrow	Flèche
@@ -78,12 +79,14 @@
 	By author	Par auteur
 	Changed lines:	Lignes modifiées :
 	Click level to modify:	Cliquez sur le niveau à modifier :
+	Collaboration Status	État de la collaboration
 	Color only	Couleur uniquement
 	Define New Multilevel List	Définir une nouvelle liste à plusieurs niveaux
 	Define New Multilevel List…	Définir une nouvelle liste à plusieurs niveaux…
 	Deletions:	Suppressions :
 	Enter formatting for number:	Entrez la mise en forme des numéros :
 	Follow number with:	Faire suivre le numéro de :
+	Forget a Contact	Oublier un contact
 	Formatting	Mise en forme
 	Formatting exceptions	Exceptions de mise en forme
 	Include level number from:	Inclure le numéro de niveau de :
@@ -91,9 +94,11 @@
 	Insertions and Deletions	Insertions et suppressions
 	Insertions:	Insertions :
 	Inside:	Intérieur :
+	Invite to Document	Inviter dans le document
 	Left border	Bordure gauche
 	Legal style numbering	Numérotation de style juridique
 	Link level to style:	Lier le niveau au style :
+	List Contacts	Liste des contacts
 	List Definition	Définition de liste
 	Mirror indents	Retraits en miroir
 	Nothing	Rien
@@ -103,7 +108,10 @@
 	Outside border	Bordure extérieure
 	Overtype	Remplacement
 	Outside:	Extérieur :
+	Pending Join Requests	Demandes de participation en attente
+	Realm Membership	Appartenance au domaine
 	Restart list after:	Redémarrer la liste après :
+	Revoke a Holder	Révoquer l’accès
 	Right border	Bordure droite
 	Save the document to turn on AutoSave	Enregistrez le document pour activer l’enregistrement automatique
 	Save the document to turn on AutoSave (a file you have only opened isn't rewritten until you save it)	Enregistrez le document pour activer l’enregistrement automatique (un fichier que vous avez simplement ouvert n’est pas réécrit tant que vous ne l’enregistrez pas)

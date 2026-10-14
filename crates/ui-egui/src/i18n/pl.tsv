@@ -51,6 +51,7 @@
 	Alt Text	Tekst alternatywny
 	Apply Character Style	Zastosuj styl znaku
 	Apply Style	Zastosuj styl
+	Approve a Joiner	Zatwierdź dołączającego
 	Arrange	Rozmieszczanie
 	Arrange\nAll	Rozmieść\nwszystkie
 	Arrow	Strzałka
@@ -134,6 +135,7 @@
 	Clipboard	Schowek
 	Close	Zamknij
 	Close Header and Footer	Zamknij nagłówek i stopkę
+	Collaboration Status	Stan współpracy
 	Collapse Selection	Zwiń zaznaczenie
 	Color	Kolor
 	Color:	Kolor:
@@ -278,6 +280,7 @@
 	Footer	Stopka
 	Footnote and Endnote	Przypis dolny i końcowy
 	Footnotes	Przypisy dolne
+	Forget a Contact	Zapomnij kontakt
 	Format	Format
 	Format Page Numbers	Formatuj numery stron
 	Format Page Numbers…	Formatuj numery stron…
@@ -359,6 +362,7 @@
 	Inspect Document	Przejrzyj dokument
 	Inspect Styles at Selection	Przejrzyj style zaznaczenia
 	Interface language:	Język interfejsu:
+	Invite to Document	Zaproś do dokumentu
 	Italic	Kursywa
 	Join the ArtCraft community on Discord	Dołącz do społeczności ArtCraft na Discordzie
 	Join us on Discord: discord.gg/artcraft	Dołącz do nas na Discordzie: discord.gg/artcraft
@@ -399,6 +403,7 @@
 	Link	Link
 	Link to Previous	Połącz z poprzednim
 	Links	Linki
+	List Contacts	Lista kontaktów
 	Location: {path}	Lokalizacja: {path}
 	MIT OR Apache-2.0. Copyright (c) 2026 ArtCraft Team and the WordCraft contributors.	MIT lub Apache-2.0. Copyright (c) 2026 ArtCraft Team i współtwórcy WordCraft.
 	Macros	Makra
@@ -521,6 +526,7 @@
 	Paste: Merge Formatting	Wklej: scal formatowanie
 	Pen	Pióro
 	Pencil	Ołówek
+	Pending Join Requests	Oczekujące prośby o dołączenie
 	Picture Border	Obramowanie obrazu
 	Picture Format	Formatowanie obrazu
 	Picture Styles	Style obrazu
@@ -555,6 +561,7 @@
 	Picture	Obraz
 	Pastes the clipboard's picture.	Wkleja obraz ze schowka.
 	Reading Highlight	Wyróżnienie wyników
+	Realm Membership	Członkostwo w domenie
 	Recent	Ostatnie
 	Record Macro	Zarejestruj makro
 	Recover Unsaved Documents	Odzyskaj niezapisane dokumenty
@@ -600,6 +607,7 @@
 	Reviewing	Recenzowanie
 	Reviewing Pane	Okienko recenzji
 	Reviewing — edits become suggestions	Recenzowanie — zmiany stają się propozycjami
+	Revoke a Holder	Odbierz dostęp
 	Rich Text Format (*.rtf)	Format RTF (*.rtf)
 	Rich Text Format (RTF)	Format RTF
 	Right	Do prawej

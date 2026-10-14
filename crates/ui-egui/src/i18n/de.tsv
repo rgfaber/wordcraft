@@ -55,6 +55,7 @@
 	Apply Character Style	Zeichenformatvorlage anwenden
 	Apply Style	Formatvorlage anwenden
 	Apply Styles	Formatvorlagen anwenden
+	Approve a Joiner	Beitretende Person zulassen
 	Arrange	Anordnen
 	Arrange\nAll	Alle\nanordnen
 	Arrow	Pfeil
@@ -80,6 +81,7 @@
 	By author	Nach Autor
 	Changed lines:	Geänderte Zeilen:
 	Click level to modify:	Zu ändernde Ebene anklicken:
+	Collaboration Status	Status der Zusammenarbeit
 	Color only	Nur Farbe
 	Compress punctuation at the start of a line	Satzzeichen am Zeilenanfang komprimieren
 	Dark page (white text on black)	Dunkle Seite (weißer Text auf Schwarz)
@@ -91,17 +93,20 @@
 	Edit Comment	Kommentar bearbeiten
 	Enter formatting for number:	Formatierung für die Nummer eingeben:
 	Follow number with:	Der Nummer folgt:
+	Forget a Contact	Kontakt vergessen
 	Formatting	Formatierung
 	Include level number from:	Ebenennummer übernehmen aus:
 	Ink	Freihand
 	Insertions and Deletions	Einfügungen und Löschungen
 	Insertions:	Einfügungen:
+	Invite to Document	Zum Dokument einladen
 	Left border	Linke Rahmenlinie
 	Left Margin	Linker Rand
 	Indents and Spacing	Einzüge und Abstände
 	Legal style numbering	Nummerierung im juristischen Stil
 	Line breaking	Zeilenumbruch
 	Link level to style:	Ebene mit Formatvorlage verknüpfen:
+	List Contacts	Kontakte auflisten
 	List Definition	Listendefinition
 	More templates →	Weitere Vorlagen →
 	No templates match your search.	Keine Vorlagen entsprechen Ihrer Suche.
@@ -110,8 +115,11 @@
 	Number format	Nummernformat
 	Number style for this level:	Nummernstil für diese Ebene:
 	Outside border	Äußere Rahmenlinie
+	Pending Join Requests	Ausstehende Beitrittsanfragen
+	Realm Membership	Mitgliedschaft im Bereich
 	Reopen	Erneut öffnen
 	Restart list after:	Liste neu starten nach:
+	Revoke a Holder	Zugriff entziehen
 	Right border	Rechte Rahmenlinie
 	Right Margin	Rechter Rand
 	Search for templates	Vorlagen suchen

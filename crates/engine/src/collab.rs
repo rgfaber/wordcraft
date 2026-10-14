@@ -79,6 +79,18 @@ impl Session {
         self.collab = Some(CollabRuntime::new(craft_collab::CollabSession::host(doc, name, transport, &body)));
     }
 
+    /// Shares through a session the app's mesh wiring built (a config or
+    /// an invite): this document follows it from the next tick.
+    pub fn collab_install(&mut self, shared: craft_collab::CollabSession) {
+        self.collab = Some(CollabRuntime::new(shared));
+    }
+
+    /// The body as the shared text seeds it, for a session the mesh wiring
+    /// builds as host.
+    pub fn collab_body(&self) -> Vec<craft_collab::BodyParagraph> {
+        body_paragraphs_of(&self.doc)
+    }
+
     /// Joins an already-shared `doc` as `name`: the first tick asks a peer
     /// for the document snapshot, so stable paragraph ids line up before
     /// this author types.

@@ -81,5 +81,3 @@ getrandom = "0.3"
 # file association on Windows, `open` on macOS) without blocking; already in the tree via egui_kittest.
 open = "5.4"
 
-[dev-dependencies]
-tempfile = "3"

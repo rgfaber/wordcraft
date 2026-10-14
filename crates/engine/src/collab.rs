@@ -510,15 +510,25 @@ impl Session {
         holder: Option<(&str, &str)>,
     ) -> Result<String, String> {
         let now = now_ms();
-        let (doc, host, host_key, host_name, token) = {
+        // The host's own realm, when it is signed in to one: what the joiner
+        // shows beside its name.
+        let host_realm = self.realm.as_ref().filter(|r| r["signedIn"] == true).and_then(|r| r["realm"].as_str()).map(str::to_string);
+        let (doc, host, host_key, host_name, token, member_realm) = {
             let Some(c) = self.collab.as_ref() else { return Err("not collaborating".into()) };
             let Some(issuer) = c.issuer.as_ref() else { return Err("this session is not the host".into()) };
+            // A realm invite names the realm whose members it admits: the
+            // verifier's, which may be another realm than the host's own.
+            let member_realm = match (realm_members, c.member_verifier.as_ref()) {
+                (true, Some(verifier)) => Some(verifier.realm().to_string()),
+                (true, None) => return Err("this document is not shared with a realm".into()),
+                (false, _) => None,
+            };
             let token = match holder {
                 // An invite for one person: the token is pre-named for them.
                 Some((node, _name)) => issuer.issue(&c.doc, node, role, ttl_ms, now)?,
                 None => issuer.open_token(&c.doc, role, ttl_ms, now)?,
             };
-            (c.doc.clone(), issuer.node_id(), issuer.carried_key(), c.name.clone(), token)
+            (c.doc.clone(), issuer.node_id(), issuer.carried_key(), c.name.clone(), token, member_realm)
         };
         let mut invite = craft_collab::Invite {
             v: craft_collab::INVITE_VERSION,
@@ -534,6 +544,8 @@ impl Session {
             expires_ms: now.saturating_add(ttl_ms),
             token: if realm_members { None } else { Some(token) },
             member_role: if realm_members { Some(role) } else { None },
+            member_realm,
+            host_realm,
             invitee: holder.map(|(node, _)| node.to_string()),
             invitee_name: holder.map(|(_, name)| name.to_string()),
             signature: Vec::new(),
@@ -1438,6 +1450,10 @@ mod tests {
         fn role(&self) -> craft_collab::Role {
             self.role
         }
+
+        fn realm(&self) -> &str {
+            "test.realm-e"
+        }
     }
 
     /// A host that mints real grant structures for the join-flow tests; the
@@ -1728,6 +1744,40 @@ mod tests {
         host.collab_tick();
         assert_eq!(host.doc.plain_text(StoryRef::Body), "shared ", "a viewer's edit does not land");
         assert_eq!(host.collab_stats()["unauthorized"], 1);
+    }
+
+    /// Cross-realm: a host signed in to realm H shares with realm E's
+    /// members. Its realm invite names E as the member realm (what the
+    /// joiner presents a membership of) and H as the host's own realm.
+    #[test]
+    fn a_realm_invite_names_the_shared_realm_and_the_hosts_own_realm() {
+        let mut bus = MemoryTransport::bus(&["aaaaaaaa"]);
+        let mut host = session();
+        host.collab_attach("demo", "Host", Box::new(bus.remove(0)));
+        host.collab_set_access(host_table());
+        host.collab_set_issuer(Box::new(TestIssuer { host: "aaaaaaaa".into() }));
+        host.collab_set_realm(json!({"signedIn": true, "realm": "test.realm-h"}));
+        host.collab_set_member_verifier(Box::new(TestMemberVerifier {
+            accepts: "member-good".into(),
+            role: craft_collab::Role::Editor,
+            ends_ms: None,
+        }));
+        let line = host.collab_mint_realm_invite(&"cc".repeat(32), "", "station.example:4433:dd", "pq_hybrid", 60_000).expect("a realm invite");
+        let invite = craft_collab::Invite::decode(&line).expect("decode");
+        assert_eq!(invite.member_realm.as_deref(), Some("test.realm-e"), "the joiner presents an E membership");
+        assert_eq!(invite.host_realm.as_deref(), Some("test.realm-h"), "the host is attested in H");
+        assert_eq!(invite.member_role, Some(craft_collab::Role::Editor));
+        assert!(invite.token.is_none());
+
+        // A host not signed in to any realm names none; a token invite names
+        // no member realm.
+        host.collab_set_realm(json!({"signedIn": false}));
+        let line = host
+            .collab_mint_invite(&"cc".repeat(32), "", "station.example:4433:dd", "pq_hybrid", craft_collab::Role::Editor, 60_000)
+            .expect("an invite");
+        let invite = craft_collab::Invite::decode(&line).expect("decode");
+        assert_eq!(invite.host_realm, None);
+        assert_eq!(invite.member_realm, None);
     }
 
     #[test]

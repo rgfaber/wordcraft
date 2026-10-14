@@ -67,6 +67,18 @@ struct Config {
     /// "editor".
     #[serde(default)]
     share_role: Option<String>,
+    /// Realms to add to this person's trust list before sharing: each a
+    /// realm descriptor (`/.well-known/macula-realm.json`, saved to a file)
+    /// and the fingerprint the person checked. A realm shared with that is
+    /// not the transport's own must be trusted.
+    #[serde(default)]
+    trust_realms: Vec<TrustRealm>,
+}
+
+#[derive(Deserialize)]
+struct TrustRealm {
+    descriptor: String,
+    fingerprint: String,
 }
 
 fn default_identity() -> String {
@@ -278,16 +290,19 @@ pub fn attach(session: &mut Session, path: &str) -> Result<(), String> {
     session.collab_set_access(identity.verified_access(&cfg.doc));
     session.collab_set_issuer(Box::new(IdentityIssuer::new(identity.clone())));
     session.collab_set_auto_approve(cfg.auto_approve);
+    let trust_path = macula_craft_collab::realm::trust::trust_path();
+    if !cfg.trust_realms.is_empty() {
+        let trust_path = trust_path.as_deref().ok_or("no config directory for the realm trust list")?;
+        trust_realms(trust_path, &cfg.trust_realms).map_err(|e| format!("{path}: {e}"))?;
+    }
     if let Some(realm) = cfg.share_realm.as_deref() {
-        if cfg.realm_key.is_empty() {
-            return Err(format!("{path}: sharing with {realm} needs the realm's pinned key (realm_key)"));
-        }
         let role = match cfg.share_role.as_deref() {
             Some("editor") => craft_collab::Role::Editor,
             None | Some("viewer") => craft_collab::Role::Viewer,
             Some(other) => return Err(format!("{path}: unknown share_role `{other}` (viewer or editor)")),
         };
-        session.collab_set_member_verifier(Box::new(macula_craft_collab::RealmMemberVerifier::new(realm, hex_bytes(&cfg.realm_key)?, role)));
+        let verifier = share_verifier(realm, role, &cfg.realm, &cfg.realm_key, trust_path.as_deref()).map_err(|e| format!("{path}: {e}"))?;
+        session.collab_set_member_verifier(Box::new(verifier));
     }
     session.collab_set_share_context(&cfg.realm, &cfg.realm_key, &cfg.station, &cfg.profile);
     if let Some(path) = grants_path(&cfg.identity, &cfg.doc) {
@@ -310,16 +325,49 @@ pub fn join_from_invite(session: &mut Session, invite_line: &str, name: &str) ->
     join_line(session, &identity, name, invite_line)
 }
 
+/// Adds each descriptor to the trust list at `path`, refusing the lot on the
+/// first one that does not parse or whose fingerprint was not the one checked.
+fn trust_realms(path: &std::path::Path, realms: &[TrustRealm]) -> Result<(), String> {
+    let mut trust = macula_craft_collab::RealmTrust::load(path)?;
+    for entry in realms {
+        let text = std::fs::read_to_string(&entry.descriptor).map_err(|e| format!("{}: {e}", entry.descriptor))?;
+        let (descriptor, key) = macula_craft_collab::RealmDescriptor::parse(&text)?;
+        trust.trust(&descriptor.realm, &key, &entry.fingerprint)?;
+    }
+    trust.save(path)
+}
+
+/// The verifier for sharing with `realm`'s members. The transport's own
+/// realm is already pinned by the config (its key is what advertisements
+/// verify under); any other realm must be in this person's trust list.
+fn share_verifier(
+    realm: &str,
+    role: craft_collab::Role,
+    transport_realm_id: &str,
+    transport_realm_key: &str,
+    trust_path: Option<&std::path::Path>,
+) -> Result<macula_craft_collab::RealmMemberVerifier, String> {
+    let is_transport_realm = hex_bytes(transport_realm_id).is_ok_and(|id| id == macula_craft_collab::realm::realm_id_of(realm));
+    if is_transport_realm && !transport_realm_key.is_empty() {
+        return Ok(macula_craft_collab::RealmMemberVerifier::new(realm, hex_bytes(transport_realm_key)?, role));
+    }
+    let trust = match trust_path {
+        Some(path) => macula_craft_collab::RealmTrust::load(path)?,
+        None => macula_craft_collab::RealmTrust::default(),
+    };
+    trust.verifier(realm, role)
+}
+
 fn join_line(session: &mut Session, identity: &Identity, name: &str, line: &str) -> Result<(), String> {
     let invite = craft_collab::Invite::decode(line.trim())?;
     // The joiner verifies who invited it before connecting anywhere.
     macula_craft_collab::verify_invite(&invite)?;
-    // A realm invite carries no token: present this device's membership UCAN
-    // instead, when it holds one for the realm.
-    let membership = if invite.member_role.is_some() {
-        macula_craft_collab::realm::load_credential(identity.node_id(), &default_realm_name()).and_then(|cred| cred.ucan)
-    } else {
-        None
+    // A realm invite carries no token: present this device's membership of
+    // the realm the invite names (possibly not the host's own), when it
+    // holds one.
+    let membership = match (&invite.member_role, invite.member_realm.as_deref()) {
+        (Some(_), Some(member_realm)) => macula_craft_collab::realm::load_credential(identity.node_id(), member_realm).and_then(|cred| cred.ucan),
+        _ => None,
     };
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     if !invite.is_live(now) {
@@ -335,8 +383,7 @@ fn join_line(session: &mut Session, identity: &Identity, name: &str, line: &str)
     if let Some(path) = contacts_path(identity.slug()) {
         session.collab_set_contacts_path(&path);
     }
-    let realm_name = default_realm_name();
-    session.collab_note_contact(&invite.host, &invite.host_name, Some(realm_name.as_str()));
+    session.collab_note_contact(&invite.host, &invite.host_name, invite.host_realm.as_deref());
     Ok(())
 }
 
@@ -403,6 +450,48 @@ fn hex32(s: &str) -> Result<[u8; 32], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const IO_MACULA: &str = include_str!("../tests/vectors/io.macula.well-known.json");
+    const IO_MACULA_ID: &str = "abb81b5a614b63551b400b810648c0c8a78efad845442630c94b46cc95d2fcd1";
+    const IO_MACULA_FP: &str = "a50fef96e52b4d68ad112ff42b55dc916cd70e5b283280e8cf3cc5e492459cf6";
+
+    /// Cross-realm at the app: sharing with a realm that is not the
+    /// transport's needs it in the trust list, entered with the checked
+    /// fingerprint; the transport's own realm is already pinned by config.
+    #[test]
+    fn sharing_with_another_realm_needs_it_trusted_under_the_checked_fingerprint() {
+        use craft_collab::MembershipVerifier as _;
+        let dir = tempfile::tempdir().expect("dir");
+        let trust = dir.path().join("trusted-realms.json");
+        let descriptor = dir.path().join("io.macula.json");
+        std::fs::write(&descriptor, IO_MACULA).expect("descriptor");
+        let other_transport = "cc".repeat(32);
+
+        // Not the transport's realm and not trusted: refused, with the fix named.
+        let err = share_verifier("io.macula", craft_collab::Role::Editor, &other_transport, "ee", Some(&trust)).err().expect("refused");
+        assert!(err.contains("trusted realms"), "{err}");
+
+        // A fingerprint that is not the key's: nothing is trusted.
+        let wrong = [TrustRealm { descriptor: descriptor.display().to_string(), fingerprint: "00".repeat(32) }];
+        assert!(trust_realms(&trust, &wrong).is_err());
+        assert!(share_verifier("io.macula", craft_collab::Role::Editor, &other_transport, "ee", Some(&trust)).is_err());
+
+        // The checked fingerprint: trusted, and the verifier checks that realm.
+        let right = [TrustRealm { descriptor: descriptor.display().to_string(), fingerprint: IO_MACULA_FP.into() }];
+        trust_realms(&trust, &right).expect("trusted");
+        let verifier = share_verifier("io.macula", craft_collab::Role::Editor, &other_transport, "ee", Some(&trust)).expect("now trusted");
+        assert_eq!(verifier.realm(), "io.macula");
+        assert_eq!(verifier.role(), craft_collab::Role::Editor);
+    }
+
+    #[test]
+    fn the_transport_realm_is_shared_with_under_its_pinned_key() {
+        use craft_collab::MembershipVerifier as _;
+        let dir = tempfile::tempdir().expect("dir");
+        let verifier = share_verifier("io.macula", craft_collab::Role::Viewer, IO_MACULA_ID, "ee", Some(&dir.path().join("none.json")))
+            .expect("pinned by config");
+        assert_eq!(verifier.realm(), "io.macula");
+    }
 
     /// Raf's live repro, fixed and green: a plain run (no `--collab`)
     /// pressing Share then Sign in. The startup default loads the identity,

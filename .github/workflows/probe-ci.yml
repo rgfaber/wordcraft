@@ -1,0 +1,11 @@
+# Throwaway: does a workflow added by a pull request run in this fork at all?
+name: CI probe
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo probe

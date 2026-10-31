@@ -11,10 +11,16 @@ and the run asserts the canonical dumps stayed equal, then leaves evidence:
 a transcript, screenshots, and the station/link facts.
 
 Usage:
+  MACULA_SWEEP_REALM=net.beam-campus \
   python3 scripts/collab_demo.py --bin target/release/wordcraft \
-      --realm-key-file /path/to/io_macula_realm_key.hex \
+      --realm-key-file /path/to/the_test_realm_key.hex \
       [--mode headless|visual] [--stations S1,S2,S3] [--out DIR] [--doc NAME] \
       [--record OUT.mp4]
+
+  MACULA_SWEEP_REALM names the one realm the run joins — the realm the app
+      signs in to and the realm every instance auto-joins, one value for both.
+      There is no default, and io.macula (production) is refused outright:
+      a sweep belongs on the test realm, not beside real users' member rows.
 
   --record OUT.mp4 renders a short 16:9 clip of the story from the real
       windows' own frames (each instance's UI is captured through the
@@ -50,9 +56,39 @@ import time
 # The stations a demo dials, `host:port:node_hex`, comma-separated (MACULA_STATIONS);
 # deployment details, so they are never committed.
 DEFAULT_STATIONS = [s.strip() for s in os.environ.get("MACULA_STATIONS", "").split(",") if s.strip()]
-REALM_NAME = "io.macula"
-REALM_ID = hashlib.sha256(REALM_NAME.encode()).hexdigest()
+# The realm this run joins is the one the sweep names (MACULA_SWEEP_REALM), and
+# io.macula is refused outright: it is the production realm, a test run has no
+# business putting member rows in it, and there is no default to fall back on
+# (macula-craft-collab#41).
+PRODUCTION_REALM = "io.macula"
 PROFILE = "pq_hybrid"
+
+
+class RealmRefused(Exception):
+    """A run may not join this realm at all."""
+
+
+def sweep_realm(environ):
+    """The one realm this run joins, named by the sweep and never assumed.
+
+    Read from `MACULA_SWEEP_REALM`, or from `MACULA_CRAFT_AUTOJOIN_REALM` when a
+    harness exported that instead — one value, so the realm the app signs in to
+    and the realm it auto-joins cannot disagree. Two variables that differ are
+    refused rather than resolved: silently preferring one is how they drifted
+    apart in the first place. No default, and production is refused outright
+    rather than behind a flag: a sweep belongs on the test realm
+    (macula-realm#138).
+    """
+    named = environ.get("MACULA_SWEEP_REALM", "").strip()
+    auto_join = environ.get("MACULA_CRAFT_AUTOJOIN_REALM", "").strip()
+    if named and auto_join and named != auto_join:
+        raise RealmRefused(f"MACULA_SWEEP_REALM names {named} and MACULA_CRAFT_AUTOJOIN_REALM names {auto_join}; one run joins one realm")
+    name = named or auto_join
+    if not name:
+        raise RealmRefused("MACULA_SWEEP_REALM must name the realm this run joins (e.g. net.beam-campus); there is no default")
+    if name == PRODUCTION_REALM:
+        raise RealmRefused(f"refusing to run against {PRODUCTION_REALM}, the production realm")
+    return name
 
 
 def short(hexid):
@@ -95,6 +131,15 @@ class Demo:
         self.instances.append(inst)
         return inst
 
+    def autojoin_env(self):
+        """The auto-join variable, naming the run's own realm and nothing else.
+
+        It cannot name another realm by construction: the value comes from the
+        run's slice of args, the same one its config carries, so the two cannot
+        drift apart the way a second constant did (macula-craft-collab#41).
+        """
+        return {"MACULA_CRAFT_AUTOJOIN_REALM": self.args.realm_name}
+
     def stop_all(self):
         for inst in self.instances:
             inst.stop()
@@ -102,8 +147,8 @@ class Demo:
     def facts(self, extra):
         facts = {
             "doc": self.doc,
-            "realm": REALM_NAME,
-            "realmIdShort": short(REALM_ID),
+            "realm": self.args.realm_name,
+            "realmIdShort": short(self.args.realm_id),
             "stations": [short(s.rsplit(":", 1)[1]) for s in self.args.stations],
             "stationsHosts": [s.split(":")[0] for s in self.args.stations],
             "profile": PROFILE,
@@ -131,7 +176,7 @@ class Demo:
         self.log(f"WordCraft + Macula demo: {self.doc}, mode={self.args.mode}, stations={[short(s.rsplit(':', 1)[1]) for s in self.args.stations]}")
 
         # 1. The host: device-tier realm sign-in at connect, then shares the doc.
-        host = self.launch("host", self.args.ports[0], self.args.stations[0], self.host_config(), {"MACULA_CRAFT_AUTOJOIN_REALM": REALM_NAME})
+        host = self.launch("host", self.args.ports[0], self.args.stations[0], self.host_config(), self.autojoin_env())
         host.wait_ready(90)
         self.log("host: up")
         host.wait_until(lambda i: i.stats()["active"] and i.stats()["joined"], 60, "host in the document")
@@ -144,13 +189,13 @@ class Demo:
         host.run("text.insert", {"text": "Host start. "})
 
         invited = host.request({"method": "engine.execute", "params": {"command": "collab.invite", "params": {
-            "realm": REALM_ID, "realmKey": self.args.realm_key, "seed": self.args.stations[0], "profile": PROFILE, "role": "editor", "ttlMs": 86400000}}})
+            "realm": self.args.realm_id, "realmKey": self.args.realm_key, "seed": self.args.stations[0], "profile": PROFILE, "role": "editor", "ttlMs": 86400000}}})
         invite = invited["result"]["invite"]
         self.log(f"host: minted an invite (token for {json.loads(invite)['doc']}, valid 24h)")
 
         # 2. Two joiners apply the invite; the host approves them by hand.
-        j1 = self.launch("bob", self.args.ports[1], self.args.stations[1], self.joiner_config("bob", "Bob", invite), {"MACULA_CRAFT_AUTOJOIN_REALM": REALM_NAME})
-        j2 = self.launch("carol", self.args.ports[2], self.args.stations[2], self.joiner_config("carol", "Carol", invite), {"MACULA_CRAFT_AUTOJOIN_REALM": REALM_NAME})
+        j1 = self.launch("bob", self.args.ports[1], self.args.stations[1], self.joiner_config("bob", "Bob", invite), self.autojoin_env())
+        j2 = self.launch("carol", self.args.ports[2], self.args.stations[2], self.joiner_config("carol", "Carol", invite), self.autojoin_env())
         j1.wait_ready(90)
         j2.wait_ready(90)
         self.log("joiners: up, asking for admission")
@@ -233,7 +278,7 @@ class Demo:
         self.concurrent_type([(host, "Downtime-H. "), (j1, "Downtime-B. ")])
         host.wait_until(lambda i: "Downtime-B." in i.text(), 60, "the during-downtime edit reached the host")
         self.settle(host, j1)
-        j2 = self.launch("carol", self.args.ports[2], self.args.stations[2], self.joiner_config("carol", "Carol", invite), {"MACULA_CRAFT_AUTOJOIN_REALM": REALM_NAME})
+        j2 = self.launch("carol", self.args.ports[2], self.args.stations[2], self.joiner_config("carol", "Carol", invite), self.autojoin_env())
         j2.wait_ready(90)
         self.approve_pending(host)
         j2.wait_until(lambda i: i.stats()["joined"] and "Downtime-B." in i.text() and "Downtime-H." in i.text(), 90, "carol rejoined and caught up from the snapshot")
@@ -462,7 +507,7 @@ class Demo:
         self.pause(1.4)
         j1.run("text.insert", {"text": "Still here. "})
         self.pause(2.4)
-        j2 = self.launch("carol", self.args.ports[2], self.args.stations[2], self.joiner_config("carol", "Carol", invite), {"MACULA_CRAFT_AUTOJOIN_REALM": REALM_NAME})
+        j2 = self.launch("carol", self.args.ports[2], self.args.stations[2], self.joiner_config("carol", "Carol", invite), self.autojoin_env())
         j2.wait_ready(90)
         if self.recorder:
             self.recorder.watch(j2)
@@ -519,9 +564,9 @@ class Demo:
     def host_config(self):
         cfg = {
             "station": self.args.stations[0],
-            "realm": REALM_ID,
+            "realm": self.args.realm_id,
             "realm_key": self.args.realm_key,
-            "realm_name": REALM_NAME,
+            "realm_name": self.args.realm_name,
             "doc": self.doc,
             "name": "Host",
             "identity": f"demo{self.run_id}-host",
@@ -915,6 +960,12 @@ def main():
     args = parser.parse_args()
     if not args.stations.strip():
         parser.error("no stations: set MACULA_STATIONS (host:port:node_hex, comma-separated) or pass --stations")
+
+    try:
+        args.realm_name = sweep_realm(os.environ)
+    except RealmRefused as refused:
+        parser.error(str(refused))
+    args.realm_id = hashlib.sha256(args.realm_name.encode()).hexdigest()
 
     args.stations = [s for s in args.stations.split(",") if s]
     args.ports = [int(p) for p in args.ports.split(",")]

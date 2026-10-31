@@ -1,0 +1,27 @@
+# The live sweep's driver joins one realm and refuses io.macula
+# (macula-craft-collab#41). Python only: seconds, no Rust build, and the one
+# workflow in this fork that is not a release.
+name: Sweep driver
+
+on:
+  pull_request:
+    paths: ["scripts/**", ".github/workflows/sweep-driver.yml"]
+  push:
+    branches: [mesh-preview]
+    paths: ["scripts/**", ".github/workflows/sweep-driver.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sweep-driver-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  realm-rule:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The driver joins one realm, and never io.macula
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v

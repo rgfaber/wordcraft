@@ -5,9 +5,9 @@ name: Packaging lint
 on:
   push:
     branches: [main, release]
-    paths: [".github/workflows/**", "packaging/**", "assets/app-icon/**", "scripts/**"]
+    paths: [".github/workflows/**", "packaging/**", "assets/app-icon/**"]
   pull_request:
-    paths: [".github/workflows/**", "packaging/**", "assets/app-icon/**", "scripts/**"]
+    paths: [".github/workflows/**", "packaging/**", "assets/app-icon/**"]
   workflow_dispatch:
 
 permissions:
@@ -36,12 +36,3 @@ jobs:
           desktop-file-validate packaging/linux/io.macula.wordcraft-mesh.desktop
           sed -e 's/@VERSION@/0.0.0/' -e 's/@DATE@/2026-01-01/' packaging/linux/io.macula.wordcraft-mesh.metainfo.xml.in >"$RUNNER_TEMP/io.macula.wordcraft-mesh.metainfo.xml"
           appstreamcli validate --no-net --explain "$RUNNER_TEMP/io.macula.wordcraft-mesh.metainfo.xml"
-
-  sweep-driver:
-    # The live sweep's driver joins one realm and refuses io.macula
-    # (macula-craft-collab#41). Python only: seconds, no Rust build.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: The driver's realm rule
-        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v

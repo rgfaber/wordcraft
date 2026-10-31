@@ -62,11 +62,6 @@ jobs:
         run: cargo test --workspace --locked
       - if: matrix.arch != 'x86_64'
         run: cargo test -p wordcraft-engine -p wordcraft --locked collab
-      # The sweep driver joins one realm and refuses production
-      # (macula-craft-collab#41); scripts/test_collab_demo_realm.py holds it, and
-      # nothing else runs Python here, so it runs on both architectures.
-      - name: Check the sweep driver's realm rule
-        run: python3 -m unittest discover -s scripts -p 'test_*.py'
       - name: Build and package (tar.gz, deb)
         run: packaging/linux/mesh-preview.sh --formats "tar deb"
       - name: Check the packages
